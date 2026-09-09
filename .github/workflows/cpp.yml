@@ -1,0 +1,67 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One compiler failing should not hide the result of the other.
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        # Warnings are errors in CI only: a warning must never reach main, but
+        # it should not block someone mid-edit on their own machine.
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DMINIDB_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to an exact version: clang-format output changes between
+      # releases, so an unpinned runner upgrade would fail this job on code
+      # nobody touched.
+      - name: Install clang-format
+        run: pipx install clang-format==22.1.8
+
+      - name: Check formatting
+        run: |
+          clang-format --version
+          git ls-files '*.cpp' '*.hpp' | xargs --no-run-if-empty clang-format --dry-run --Werror

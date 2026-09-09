@@ -1,0 +1,48 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+out/
+install/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Compiler and linker artefacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.gcda
+*.gcno
+*.d
+
+# MiniDB runtime data: databases created while testing by hand
+data/
+*.minidb
+*.wal
+*.snapshot
+
+# Editors and tooling
+.vscode/
+.idea/
+.cache/
+*.swp
+*~
+
+# Operating system
+.DS_Store
+Thumbs.db

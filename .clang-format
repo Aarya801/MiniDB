@@ -1,0 +1,25 @@
+# Formatting is enforced by CI so that no review comment is ever about
+# whitespace. Based on the Google style with a wider column limit and
+# four-space indentation for readability in a teaching codebase.
+---
+Language: Cpp
+BasedOnStyle: Google
+
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -4
+ContinuationIndentWidth: 4
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Include blocks are kept as written (related header, then standard library,
+# then project headers) and sorted within each block.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+SpaceAfterTemplateKeyword: false
