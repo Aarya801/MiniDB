@@ -1,5 +1,6 @@
 #include "minidb/result.hpp"
 
+#include <ostream>
 #include <stdexcept>
 #include <utility>
 
@@ -32,6 +33,10 @@ std::string_view to_string(StatusCode code) noexcept {
     // default label above, so adding an enumerator makes the compiler warn
     // about the unhandled case instead of silently falling through to here.
     return "UNKNOWN_STATUS";
+}
+
+std::ostream& operator<<(std::ostream& out, StatusCode code) {
+    return out << to_string(code);
 }
 
 Result::Result(StatusCode code, Value payload, std::string message)

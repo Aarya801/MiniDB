@@ -89,6 +89,26 @@ std::string describe(const T& value) {
     }
 }
 
+/// Compares two values and, on mismatch, fills `detail` with a description.
+///
+/// This is a function rather than code inside the macro for a lifetime reason.
+/// A macro that binds `const auto& a = (actual);` ends its full-expression at
+/// that statement, so a temporary created by `actual` -- for example the
+/// Result returned by `database.get(k)` behind a `.value()` call -- is
+/// destroyed before the comparison runs, leaving a dangling reference. Passing
+/// the operands as arguments keeps every temporary alive until this call
+/// returns, and evaluates each operand exactly once.
+template<typename Actual, typename Expected>
+[[nodiscard]] bool equal_or_describe(const Actual& actual, const Expected& expected,
+                                     std::string& detail) {
+    if (actual == expected) {
+        return true;
+    }
+    detail =
+        "\n        actual:   " + describe(actual) + "\n        expected: " + describe(expected);
+    return false;
+}
+
 /// Runs every registered case. Returns a process exit code.
 inline int run_all() {
     std::size_t passed = 0;
@@ -157,18 +177,14 @@ inline int run_all() {
 
 #define EXPECT_FALSE(expression) EXPECT_TRUE(!(expression))
 
-#define EXPECT_EQ(actual, expected)                                                         \
-    do {                                                                                    \
-        const auto& minidb_actual = (actual);                                               \
-        const auto& minidb_expected = (expected);                                           \
-        if (!(minidb_actual == minidb_expected)) {                                          \
-            ++::minidb::testing::current_case_failures();                                   \
-            ::minidb::testing::report_failure(                                              \
-                __FILE__, __LINE__,                                                         \
-                std::string(#actual " == " #expected "\n        actual:   ") +              \
-                    ::minidb::testing::describe(minidb_actual) +                            \
-                    "\n        expected: " + ::minidb::testing::describe(minidb_expected)); \
-        }                                                                                   \
+#define EXPECT_EQ(actual, expected)                                                       \
+    do {                                                                                  \
+        std::string minidb_detail;                                                        \
+        if (!::minidb::testing::equal_or_describe((actual), (expected), minidb_detail)) { \
+            ++::minidb::testing::current_case_failures();                                 \
+            ::minidb::testing::report_failure(__FILE__, __LINE__,                         \
+                                              #actual " == " #expected + minidb_detail);  \
+        }                                                                                 \
     } while (false)
 
 #define EXPECT_NE(actual, unexpected) EXPECT_TRUE(!((actual) == (unexpected)))

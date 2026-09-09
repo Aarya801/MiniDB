@@ -17,4 +17,6 @@ function(minidb_add_test test_name)
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 60)
 endfunction()
 
+minidb_add_test(test_command_parser)
+minidb_add_test(test_database)
 minidb_add_test(test_result)

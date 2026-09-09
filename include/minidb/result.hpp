@@ -1,6 +1,7 @@
 #ifndef MINIDB_RESULT_HPP
 #define MINIDB_RESULT_HPP
 
+#include <iosfwd>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,10 @@ enum class StatusCode {
 /// Stable, human-readable name for a status code. Used in error messages,
 /// test failures and the CLI.
 [[nodiscard]] std::string_view to_string(StatusCode code) noexcept;
+
+/// Streams the status name. Without this, a failed test comparison could only
+/// report the enumerator as an opaque value.
+std::ostream& operator<<(std::ostream& out, StatusCode code);
 
 /// The outcome of a database operation: either success (optionally carrying a
 /// value, as GET does) or a failure code with an explanatory message.

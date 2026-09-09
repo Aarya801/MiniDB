@@ -103,10 +103,11 @@ referenced it, and `kMaxRecordSize` was defined as key + value + 64, where the
 64 stood in for the header of a file format that does not exist yet. That is a
 magic number justified by nothing.
 
-Each limit is introduced in the milestone that checks it -- key and value bounds
-with the `SET` path, record bounds with the binary format. The `KeyTooLarge`,
-`ValueTooLarge` and `CorruptData` status codes already exist, so the error
-vocabulary is in place and the checks slot in without redesign.
+Each limit is introduced in the milestone that checks it. Milestone 1 added
+`kMaxKeySize` and `kMaxValueSize` alongside the `SET` path that enforces them;
+the record and log bounds arrive with the binary format in Milestone 3. The
+`CorruptData` status code already exists, so the error vocabulary is in place
+and those checks will slot in without redesign.
 
 ### One test executable per test file
 
@@ -121,3 +122,111 @@ losing the results of everything else, and CTest can run the files in parallel.
 yet. Git does not track empty directories, and a directory holding only a
 `.gitkeep` communicates nothing. Each is created in the milestone that gives it
 content — benchmarks in Milestone 9, examples alongside the finished CLI.
+
+---
+
+## Milestone 1 — Basic database and CLI
+
+### Why `std::unordered_map`, when the whole point is to write a hash table
+
+Milestone 2 replaces the map with a hand-written hash table. Using the standard
+one first is deliberate, not a shortcut:
+
+- **It separates two kinds of bug.** When the custom table lands, any failure in
+  the suite is a bug in the table, because everything around it already passed
+  the same tests against a known-good container. Writing the table and the
+  database together would leave every failure ambiguous.
+- **It fixes the interface first.** `Database` exposes `set`/`get`/`remove`/
+  `exists`/`keys`/`clear` and returns `Result`. None of that mentions buckets,
+  load factors or collisions, so swapping the container underneath is a change
+  to one private member and one `.cpp` file — the CLI and the tests do not move.
+- **It gives Milestone 9 an honest baseline.** The benchmark question is "how
+  does my table compare to `std::unordered_map`?" Having run the real workload
+  through the standard container first makes that comparison meaningful rather
+  than theoretical.
+
+The cost is that Milestone 1 demonstrates no original data-structure work. That
+is the correct trade: a working database with a stable interface is the platform
+everything else is built on.
+
+### The parser returns `std::variant<Command, Result>`
+
+A parse either produces a command or fails; it never does both, and there is no
+meaningful "partial command". `std::variant` states that in the type system, so
+a caller physically cannot read a `Command` out of a failed parse.
+
+The alternatives were each worse. A `Command` carrying an `is_valid` flag lets a
+caller forget to check it. An out-parameter (`bool parse(line, Command&)`) makes
+the success value look optional at every call site. `std::expected` is the
+natural fit but is C++23, which would rule out compilers MiniDB supports.
+
+The failure side is the same `Result` the database returns, so the CLI renders
+one error model rather than two.
+
+### The parser is a free function, not a class
+
+`parse_command` holds no state between calls. Wrapping it in a `CommandParser`
+class would add a constructor, an object to pass around and a header full of
+nothing, in exchange for no invariant worth protecting. A namespaced free
+function is the honest shape for a pure transformation.
+
+### `SET` takes the rest of the line; everything else takes tokens
+
+`SET name Aarya Lalan` has to store `"Aarya Lalan"`, so `SET` treats everything
+after the key as the value, trimming the ends and preserving the interior. Every
+other command takes whitespace-separated tokens.
+
+Two consequences, both accepted:
+
+- **Keys cannot contain spaces.** Quoting would fix it, and quoting brings escape
+  sequences, unterminated quotes and their error messages. That complexity buys
+  little for a key-value store whose keys are identifiers.
+- **The CLI cannot store an empty value.** `SET k` is reported as a missing
+  value rather than as a request to store `""`. The `Database::set` API accepts
+  an empty value, and a test covers it; only the text syntax cannot express it.
+
+### Commands that take no arguments reject extra ones
+
+`KEYS extra` is an error, not a `KEYS`. Silently ignoring trailing input hides
+typos, and a database that quietly does something adjacent to what was asked is
+worse than one that refuses.
+
+### `Database::keys()` does not sort
+
+Sorting would make it O(n log n) for every caller, including ones that only
+count keys or look for one. The CLI sorts what it prints, because a stable
+alphabetical listing is a presentation decision. The engine stays O(n).
+
+### Transparent hashing
+
+`Database` uses `std::unordered_map<Key, Value, StringHash, std::equal_to<>>`
+where `StringHash` declares `is_transparent`. That opts into C++20 heterogeneous
+lookup, letting `find()` take a `std::string_view` directly.
+
+Without it, every `get`, `exists` and `remove` would construct a temporary
+`std::string` purely to be thrown away after the lookup — an allocation on the
+hottest path in the program. Eight lines to delete an allocation per read is a
+good trade, and it is one of the concrete reasons this project targets C++20.
+
+### `remove` on a missing key is `NotFound`, not success
+
+Deleting something that was not there is a different outcome from deleting
+something that was, and the caller is entitled to know which happened. Returning
+`Ok` for both would make `DELETE` untestable at the boundary that matters.
+
+### A lifetime bug the warning set caught
+
+Milestone 1 was the first code to write `EXPECT_EQ(database.get(k).value(), ...)`,
+and `-Wdangling-reference` rejected it immediately.
+
+The Milestone 0 `EXPECT_EQ` began with `const auto& actual_value = (actual);`.
+That statement is its own full-expression, so the temporary `Result` returned by
+`get()` was destroyed at its semicolon, leaving the reference dangling before
+the comparison ran. The macro now passes both operands to a function template,
+`equal_or_describe`, because arguments keep temporaries alive for the duration
+of the call — and each operand is still evaluated exactly once.
+
+This is the clearest argument so far for the strict warning set: the bug was
+invisible in review, harmless in Milestone 0 where every operand was a named
+variable, and would have produced unpredictable failures the moment the tests
+grew up.
