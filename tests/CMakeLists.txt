@@ -19,4 +19,5 @@ endfunction()
 
 minidb_add_test(test_command_parser)
 minidb_add_test(test_database)
+minidb_add_test(test_hash_table)
 minidb_add_test(test_result)

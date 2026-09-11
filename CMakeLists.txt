@@ -71,6 +71,7 @@ endif()
 add_library(minidb_core STATIC
     src/command_parser.cpp
     src/database.cpp
+    src/hash_table.cpp
     src/result.cpp)
 
 target_include_directories(minidb_core PUBLIC

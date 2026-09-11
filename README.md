@@ -17,7 +17,7 @@ Built in milestones, each one a working program.
 
 - [x] **Milestone 0** — build system, warning policy, test harness, CI
 - [x] **Milestone 1** — in-memory database, command parser, interactive CLI
-- [ ] Milestone 2 — custom hash table (replaces `std::unordered_map`)
+- [x] **Milestone 2** — custom hash table with separate chaining
 - [ ] Milestone 3 — persistence
 - [ ] Milestone 4 — write-ahead log
 - [ ] Milestone 5 — crash recovery
@@ -128,14 +128,12 @@ Goodbye!
 flowchart TD
     CLI[CLI] --> Parser[Command parser]
     Parser --> Database[Database API]
-    Database --> Map[std::unordered_map]
+    Database --> HashTable[HashTable - separate chaining]
 
     Parser -.-> Result[Result / StatusCode]
     Database -.-> Result
 
-    HashTable[Custom hash table]:::planned
     Storage[Storage manager]:::planned
-    Database -.-> HashTable
     Database -.-> Storage
 
     classDef planned stroke-dasharray: 4 4
@@ -150,13 +148,47 @@ Three pieces, each with one job:
 - **`command_parser`** — turns a line of text into a `Command`, or into a
   `Result` explaining why it is not one. Stateless free function.
 - **`Database`** — stores the data. Knows nothing about terminals or syntax.
+- **`HashTable`** — MiniDB's own hash table, described below. Knows nothing
+  about keys being strings or values being database entries.
 
 Both the parser and the database report problems through the same `Result` /
 `StatusCode` pair from Milestone 0, so the CLI has one error model to render.
 
+## The hash table
+
+Since Milestone 2, storage is MiniDB's own `HashTable<Key, Value, Hash>` rather
+than `std::unordered_map`. A key reaches its bucket like this:
+
+```text
+key ──► Hash{}(key) ──► std::size_t hash ──► hash % bucket_count ──► bucket index
+```
+
+Keys that land on the same index are kept in a singly linked chain hanging off
+that bucket — **separate chaining**. A collision costs extra key comparisons
+and never loses data.
+
+| Property | Choice | Reason |
+| --- | --- | --- |
+| Collision strategy | Separate chaining | Deletion is a simple unlink; open addressing needs tombstones |
+| Bucket counts | Primes: 17, 37, 79, 163, ... | `std::hash<int>` is the identity in libstdc++, so power-of-two counts would collide badly on ordinary integer keys |
+| Max load factor | 0.75 | Keeps the expected chain under one node without wasting a large array |
+| Growth | Doubling, then round up to a prime | Makes insertion amortised O(1); fixed-size growth would be O(n²) overall |
+| Node storage | `std::unique_ptr` chains | Explicit ownership, no leaks, no raw owning pointers |
+| Hash caching | Stored per node | Rehashing recomputes only a remainder, never re-hashes a key |
+
+Two properties worth knowing:
+
+- **Pointers survive a rehash.** Growing relinks existing nodes rather than
+  recreating them, so a pointer from `find()` stays valid. Only erasing that
+  entry or clearing the table invalidates it.
+- **Teardown is iterative.** Destroying a chain through its head `unique_ptr`
+  would recurse once per node and exhaust the stack on a long chain, so
+  `clear()` unlinks each node before releasing it. There is a test that builds
+  a 20,000-node chain to prove it.
+
 ## Complexity
 
-As provided by `std::unordered_map` in Milestone 1:
+As provided by `HashTable`:
 
 | Operation | Complexity |
 | --- | --- |
@@ -168,11 +200,17 @@ As provided by `std::unordered_map` in Milestone 1:
 | `CLEAR` | O(n) |
 | `size` | O(1) |
 
-These averages are **expected** values, not guarantees. A lookup degrades toward
-O(n) when many keys hash into the same bucket. The standard library keeps that
-rare by rehashing to bound the load factor, but unlucky or adversarial key sets
-can still cause it. `KEYS` as printed by the CLI is O(n log n), because the CLI
-sorts for readable output; `Database::keys()` itself is O(n).
+Plus, on the table itself: `rehash` is O(n), and space is O(n + bucket_count).
+
+These averages are **expected** values, not guarantees. They hold on two
+conditions: the hash spreads keys evenly, and the load factor stays bounded.
+MiniDB enforces the second by rehashing at 0.75 and delegates the first to
+`std::hash`. The worst case is every key colliding into one bucket, which turns
+the table into a linked list — the test suite reproduces this deliberately
+rather than assuming it cannot happen.
+
+`KEYS` as printed by the CLI is O(n log n), because the CLI sorts for readable
+output; `Database::keys()` itself is O(n).
 
 ## Testing
 
@@ -191,6 +229,7 @@ ctest --test-dir build -R test_database -V
 
 | Suite | Covers |
 | --- | --- |
+| `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
 | `test_database` | Every operation, empty state, overwrites, size limits, binary values, 1000-key stress |
 | `test_command_parser` | Every command, spaces in values, case handling, missing and extra arguments, unknown commands |
 | `test_result` | The `Result` / `StatusCode` error model |
@@ -204,7 +243,6 @@ third-party library. The reasoning is in
 As of Milestone 1, MiniDB does **not**:
 
 - Persist anything. Data lives in memory and is lost on exit.
-- Use its own hash table yet — it wraps `std::unordered_map` (Milestone 2).
 - Support transactions, caching, or concurrent access.
 - Allow spaces in keys, since arguments are whitespace-separated.
 - Allow an empty value from the CLI, though `Database::set` accepts one.
@@ -220,7 +258,8 @@ And it is not intended to ever implement:
 
 ## Documentation
 
-- [Design decisions](docs/DESIGN_DECISIONS.md)
+- [Design decisions](docs/DESIGN_DECISIONS.md) — why things are built the way they are
+- [Learning notes](docs/LEARNING_NOTES.md) — the concepts behind the code, explained from scratch
 
 ## License
 

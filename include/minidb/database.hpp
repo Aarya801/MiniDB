@@ -4,9 +4,9 @@
 #include <cstddef>
 #include <functional>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
+#include "minidb/hash_table.hpp"
 #include "minidb/result.hpp"
 #include "minidb/types.hpp"
 
@@ -14,16 +14,16 @@ namespace minidb {
 
 /// An in-memory key-value store.
 ///
-/// This is the whole database engine as of Milestone 1: entries live in a
-/// std::unordered_map and are lost when the process exits. Persistence
-/// arrives in Milestone 3, and the map itself is replaced by a hand-written
-/// hash table in Milestone 2. The public interface below is meant to survive
-/// both changes unchanged.
+/// Entries live in MiniDB's own HashTable and are lost when the process
+/// exits; persistence arrives in Milestone 3. Milestone 1 used a
+/// std::unordered_map behind this same interface, and swapping it for the
+/// hand-written table changed one private member and three lines of
+/// database.cpp -- nothing in the CLI or the database tests moved.
 ///
 /// The class knows nothing about terminals or command syntax. Callers hand it
 /// keys and values and receive a Result; formatting replies is the CLI's job.
 ///
-/// Complexity, as provided by std::unordered_map:
+/// Complexity, as provided by HashTable:
 ///
 ///   set     average O(1), worst case O(n)
 ///   get     average O(1), worst case O(n)
@@ -33,10 +33,11 @@ namespace minidb {
 ///   clear   O(n)
 ///   size    O(1)
 ///
-/// The averages are expected values, not guarantees. A lookup degrades toward
-/// O(n) when many keys collide into one bucket; the standard library keeps
-/// this rare by rehashing to bound the load factor, but adversarial or
-/// unlucky key sets can still cause it.
+/// The averages are expected values, not guarantees. They hold while the
+/// hash spreads keys evenly and the load factor stays bounded, which the
+/// table enforces by rehashing at 0.75. A lookup degrades toward O(n) when
+/// many keys collide into one bucket, which unlucky or adversarial key sets
+/// can still cause.
 class Database {
 public:
     /// Stores `value` under `key`, replacing any existing entry.
@@ -67,23 +68,24 @@ public:
     [[nodiscard]] bool empty() const noexcept;
 
 private:
-    /// Transparent hasher.
+    /// Hashes a std::string_view, so HashTable can look up a key without
+    /// first constructing a std::string. Without it every get, exists and
+    /// remove would allocate a temporary string purely to throw it away --
+    /// an allocation on the hot path of a database whose job is lookups.
     ///
-    /// Declaring is_transparent opts into C++20 heterogeneous lookup, which
-    /// lets find() accept a std::string_view directly. Without it, every
-    /// lookup would construct a temporary std::string -- an allocation on the
-    /// hot path of a database whose whole job is lookups.
+    /// std::hash<std::string_view> and std::hash<std::string> are required to
+    /// produce the same value for the same characters, so a view and the
+    /// stored string agree on their bucket.
     struct StringHash {
-        using is_transparent = void;
-
         [[nodiscard]] std::size_t operator()(std::string_view key) const noexcept {
             return std::hash<std::string_view>{}(key);
         }
     };
 
-    /// std::equal_to<> (the void specialisation) is likewise transparent, so
-    /// comparisons happen without materialising a std::string either.
-    std::unordered_map<Key, Value, StringHash, std::equal_to<>> entries_;
+    /// HashTable compares with ==, and std::string == std::string_view
+    /// already works, so the hasher above is all that is needed to keep
+    /// lookups allocation-free.
+    HashTable<Key, Value, StringHash> entries_;
 };
 
 }  // namespace minidb

@@ -30,14 +30,9 @@ Result Database::set(std::string_view key, std::string_view value) {
                                "value exceeds " + std::to_string(limits::kMaxValueSize) + " bytes");
     }
 
-    // Look up first so that overwriting an existing key reuses its storage
-    // instead of allocating a fresh Key for a string the map already holds.
-    const auto entry = entries_.find(key);
-    if (entry != entries_.end()) {
-        entry->second.assign(value);
-    } else {
-        entries_.emplace(Key(key), Value(value));
-    }
+    // insert_or_assign constructs a Key only when the entry is new, so
+    // overwriting an existing key allocates nothing for the key itself.
+    entries_.insert_or_assign(key, Value(value));
     return Result::ok();
 }
 
@@ -47,12 +42,12 @@ Result Database::get(std::string_view key) const {
         return key_check;
     }
 
-    const auto entry = entries_.find(key);
-    if (entry == entries_.end()) {
+    const Value* value = entries_.find(key);
+    if (value == nullptr) {
         // Deliberately no message: the CLI prints this verbatim as NOT_FOUND.
         return Result::failure(StatusCode::NotFound);
     }
-    return Result::ok(entry->second);
+    return Result::ok(*value);
 }
 
 Result Database::remove(std::string_view key) {
@@ -61,11 +56,9 @@ Result Database::remove(std::string_view key) {
         return key_check;
     }
 
-    const auto entry = entries_.find(key);
-    if (entry == entries_.end()) {
+    if (!entries_.erase(key)) {
         return Result::failure(StatusCode::NotFound);
     }
-    entries_.erase(entry);
     return Result::ok();
 }
 
@@ -73,15 +66,13 @@ bool Database::exists(std::string_view key) const {
     if (!validate_key(key).is_ok()) {
         return false;
     }
-    return entries_.find(key) != entries_.end();
+    return entries_.contains(key);
 }
 
 std::vector<Key> Database::keys() const {
     std::vector<Key> result;
     result.reserve(entries_.size());
-    for (const auto& entry : entries_) {
-        result.push_back(entry.first);
-    }
+    entries_.for_each([&result](const Key& key, const Value&) { result.push_back(key); });
     return result;
 }
 

@@ -230,3 +230,146 @@ This is the clearest argument so far for the strict warning set: the bug was
 invisible in review, harmless in Milestone 0 where every operand was a named
 variable, and would have produced unpredictable failures the moment the tests
 grew up.
+
+---
+
+## Milestone 2 — Custom hash table
+
+### Why the standard container went in first, and why it comes out now
+
+Milestone 1 used `std::unordered_map` deliberately: it fixed the `Database`
+interface against a container already known to be correct, so that the parser,
+the CLI and the database tests were all proven before any hand-written data
+structure existed.
+
+That paid off exactly as intended. When `HashTable` replaced the map, the
+change touched one private member in `database.hpp` and five lines of
+`database.cpp`, and all 61 existing tests passed unchanged. Any failure could
+only have come from the new table.
+
+The map comes out now because this project exists to demonstrate understanding
+of the mechanism, and a hash table is where hashing, collision resolution,
+linked structures, amortised growth and manual ownership all meet. For a real
+product, keeping `std::unordered_map` would be the correct engineering call —
+it is written by specialists and far more heavily optimised than this.
+
+### The hashing pipeline
+
+```text
+key ──► Hash{}(key) ──► std::size_t hash ──► hash % bucket_count ──► bucket index
+                              │
+                              └── cached in the node at insertion
+```
+
+Every step is in `HashTable`: `hash_of` applies the hasher, `bucket_index`
+takes the remainder, and `Node::hash` stores the value so it never has to be
+recomputed.
+
+### Separate chaining, not open addressing
+
+Each bucket owns a singly linked chain of the entries that hashed to it.
+Lookup walks the chain comparing keys; a collision costs comparisons, never
+correctness.
+
+Open addressing — probing for another free slot — has better cache behaviour
+and avoids a node allocation per entry. It was rejected because deletion is
+genuinely subtle: removing an entry can break the probe sequence that reaches
+entries inserted after it, so real implementations need tombstone markers and
+a policy for cleaning them up. `DELETE` is a command MiniDB must get right,
+and separate chaining makes it a two-line unlink that is obviously correct.
+
+The cost is honest: one heap allocation per entry, and chains scattered through
+memory rather than packed in an array.
+
+### Prime bucket counts
+
+Bucket counts come from a table of primes that roughly double: 17, 37, 79,
+163, 331, ... and beyond the table a prime is searched for directly.
+
+The modulus decides which bits of the hash survive. A power-of-two modulus
+keeps only the low bits, and libstdc++ defines `std::hash<int>` as the identity
+function — so with 16 buckets the keys 0, 16, 32, 48 would every one collide,
+from entirely ordinary data. A prime modulus folds all the bits in, so a weak
+hash degrades gradually instead of collapsing.
+
+`test_hash_table.cpp` demonstrates this with 500 integer keys that are all
+multiples of 16, and asserts no chain exceeds nine nodes.
+
+### Load factor 0.75, growth by doubling
+
+Growth is triggered when inserting one more entry *would* push
+`size / bucket_count` past 0.75.
+
+The threshold trades memory against collisions. At 1.0 the average chain is one
+node but long chains are already common; at 0.5 lookups are fast but half the
+array sits idle. 0.75 keeps the expected chain length below one while leaving a
+quarter of the array spare — the same value the JDK settled on for `HashMap`.
+
+Doubling is what keeps insertion amortised O(1). Each rehash is O(n), but it
+happens only after the table has doubled, so the cost spread over the
+insertions that caused it is constant per insertion. Growing by a fixed
+increment would make n insertions cost O(n²) in total.
+
+### Complexity
+
+| Operation | Average | Worst case |
+| --- | --- | --- |
+| `insert_or_assign` | O(1) | O(n) |
+| `find` / `contains` | O(1) | O(n) |
+| `erase` | O(1) | O(n) |
+| `for_each` | O(n + bucket_count) | O(n + bucket_count) |
+| `clear` | O(n) | O(n) |
+| `rehash` | O(n) | O(n) |
+| Space | O(n + bucket_count) | O(n + bucket_count) |
+
+The averages are conditional, not guaranteed. They require the hash to spread
+keys evenly and the load factor to stay bounded. MiniDB enforces the second
+itself and delegates the first to `std::hash`. The worst case — every key in
+one bucket, turning the table into a linked list — is reproduced deliberately
+in the tests rather than assumed impossible.
+
+### Reference stability across rehash
+
+Rehashing relinks existing nodes into the new bucket array instead of
+recreating them, so entries never move in memory. A pointer returned by
+`find()` therefore survives a rehash, and is invalidated only by erasing that
+entry or clearing the table. This is stronger than what a `std::vector`-based
+chain would give, where every growth would move every entry.
+
+### Iterative teardown
+
+Freeing a chain by destroying its head `unique_ptr` recurses once per node.
+With 20,000 colliding entries that exhausts the stack — precisely the case
+separate chaining exists to survive. `clear()` unlinks each node before
+releasing it, keeping the recursion depth at one, and a test builds a
+20,000-node chain to prove it.
+
+This is the sharp edge of `unique_ptr`-based linked structures, and the reason
+the destructor is written by hand rather than defaulted.
+
+### `for_each` instead of an iterator type
+
+A conforming forward iterator would need to skip empty buckets, compare
+correctly across buckets, and satisfy the iterator requirements — a few hundred
+lines of boilerplate. The only traversal MiniDB performs is `KEYS`. `for_each`
+supplies exactly that and nothing more.
+
+The trade-off: the table cannot be used with range-based `for` or standard
+algorithms. If a later milestone needs those, an iterator can be added without
+disturbing anything already written.
+
+### Known trade-offs
+
+- **One allocation per entry.** Node-based chaining allocates for every insert.
+  A `std::vector` per bucket would allocate less often but would invalidate
+  references on growth.
+- **Insertion into a long chain is quadratic overall.** Each insert walks the
+  chain to check for a duplicate. With a sound hash the chain is one or two
+  nodes; under a pathological hash it is the documented O(n) worst case, and
+  the 20,000-entry test pays it in full.
+- **No `reserve`.** A caller who knows the final size cannot preallocate and
+  skip the intermediate rehashes. `rehash(n)` is public and does the job
+  manually.
+- **`std::hash` is not collision-resistant.** It is not meant to be. MiniDB is
+  a local, single-process database with no untrusted input, so hash-flooding is
+  out of scope; a network-facing store would need a seeded or keyed hash.
