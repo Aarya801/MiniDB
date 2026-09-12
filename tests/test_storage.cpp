@@ -343,7 +343,7 @@ TEST(a_wrong_magic_number_is_rejected) {
 TEST(an_unsupported_version_is_rejected_as_such) {
     const TempDirectory directory;
     SnapshotBuilder builder;
-    builder.version = StorageManager::kFormatVersion + 1;
+    builder.version = StorageManager::kCheckpointVersion + 1;
     builder.add("k", "v");
 
     // Distinct from CorruptData: the file may be perfectly well formed, just

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 #include "minidb/result.hpp"
@@ -47,12 +48,14 @@ public:
     /// snapshot is rejected immediately instead of being parsed as one.
     static constexpr char kMagic[8] = {'M', 'I', 'N', 'I', 'D', 'B', 'S', 'S'};
 
-    /// Bumped whenever the layout changes incompatibly. A reader that meets a
+    /// Legacy writer version. A reader that meets a
     /// version it does not know refuses the file instead of guessing.
     static constexpr std::uint32_t kFormatVersion = 1;
 
     /// magic(8) + version(4) + record_count(8) + payload_crc32(4)
     static constexpr std::size_t kHeaderSize = 24;
+    static constexpr std::uint32_t kCheckpointVersion = 2;
+    static constexpr std::size_t kCheckpointHeaderSize = 32;
 
     explicit StorageManager(std::filesystem::path snapshot_path);
 
@@ -68,20 +71,24 @@ public:
     [[nodiscard]] bool snapshot_exists() const;
 
     /// Writes every record, replacing any existing snapshot.
+    /// An explicit checkpoint selects version 2; omission retains version 1.
     ///
     /// The records go to a temporary file which then replaces the snapshot in
     /// one filesystem operation, so a reader never observes a half-written
     /// file. See docs/STORAGE_FORMAT.md for what this does and does not
     /// guarantee against power loss.
-    Result save(const std::vector<Record>& records) const;
+    Result save(const std::vector<Record>& records,
+                std::optional<std::uint64_t> checkpoint = std::nullopt) const;
 
-    /// Reads every record into `records`, which is cleared first.
+    /// Reads version 1 or 2 into `records`, which is cleared first.
+    /// If supplied, checkpoint receives the validated sequence (zero for v1).
+    /// On failure it is zero; no unvalidated checkpoint is returned.
     ///
     /// Returns NotFound when no snapshot exists, which callers normally treat
     /// as "start empty" rather than as a failure. Any other failure means the
     /// file is unusable and `records` is left empty -- a damaged snapshot is
     /// never quietly reported as an empty database.
-    Result load(std::vector<Record>& records) const;
+    Result load(std::vector<Record>& records, std::uint64_t* checkpoint = nullptr) const;
 
 private:
     std::filesystem::path path_;

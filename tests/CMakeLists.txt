@@ -23,3 +23,11 @@ minidb_add_test(test_hash_table)
 minidb_add_test(test_result)
 minidb_add_test(test_storage)
 minidb_add_test(test_wal)
+minidb_add_test(test_recovery)
+
+add_executable(recovery_process recovery_process.cpp)
+target_link_libraries(recovery_process PRIVATE minidb_core minidb_warnings)
+add_test(NAME test_recovery_process COMMAND ${CMAKE_COMMAND}
+    "-DHELPER=$<TARGET_FILE:recovery_process>" "-DCLI=$<TARGET_FILE:minidb>"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/recovery_process.cmake")
+set_tests_properties(test_recovery_process PROPERTIES TIMEOUT 60)

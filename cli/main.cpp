@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
                   << "Database: " << database.snapshot_path().string() << "\n";
 
         const bool had_snapshot = database.snapshot_exists();
-        const minidb::Result loaded = database.load();
+        const minidb::Result loaded = database.open();
         if (!loaded.is_ok()) {
             // A damaged database is never treated as an empty one. Stopping
             // here leaves the file untouched so it can be inspected or moved

@@ -81,7 +81,8 @@ public:
     /// The write-ahead log path. Precondition: is_persistent().
     [[nodiscard]] const std::filesystem::path& wal_path() const;
 
-    /// Recovers the database: loads the snapshot, then replays the log on top.
+    /// Recovers the database: loads the snapshot, then replays newer WAL records.
+    /// Validates but skips sequences already represented by its checkpoint.
     ///
     /// A missing snapshot and a missing log are both fine -- together they
     /// mean a first run, and the database is left empty. Any real failure --
@@ -94,6 +95,9 @@ public:
     ///
     /// O(n + m) for n snapshot records and m logged operations.
     Result load();
+
+    /// Opens this persistent database by recovering snapshot then WAL.
+    Result open() { return load(); }
 
     /// Number of logged operations replayed by the last load(). Lets the CLI
     /// tell the user that work was recovered.

@@ -76,7 +76,7 @@ public:
     /// + value_length(4) + record_crc32(4)
     static constexpr std::size_t kRecordHeaderSize = 28;
 
-    /// The first sequence number a fresh or freshly reset log issues.
+    /// The first sequence number when no snapshot checkpoint is supplied.
     static constexpr std::uint64_t kFirstSequence = 1;
 
     explicit WriteAheadLog(std::filesystem::path log_path);
@@ -86,8 +86,7 @@ public:
     /// True when a regular file exists at the log path.
     [[nodiscard]] bool exists() const;
 
-    /// Sequence number of the newest record known to be in the log. Zero for
-    /// a log that is empty or has just been reset.
+    /// Highest recovered or checkpointed sequence, including after reset.
     [[nodiscard]] std::uint64_t last_sequence() const noexcept { return last_sequence_; }
 
     /// Appends a record and flushes it.
@@ -101,8 +100,9 @@ public:
     Result append_delete(std::string_view key);
     Result append_clear();
 
-    /// Reads every complete, valid record in order into `records`, which is
-    /// cleared first, and establishes the tail so appends may continue.
+    /// Validates every complete record but returns only sequences newer than
+    /// checkpoint. Clears records first and establishes the tail for appends.
+    /// Pass the matching snapshot checkpoint, including for an empty WAL.
     ///
     /// Returns NotFound when no log file exists -- normal for a database that
     /// has never been written to, and not an error. A log that is damaged
@@ -114,7 +114,7 @@ public:
     /// through an append. Every complete record before it is replayed, the
     /// fragment is discarded, and the file is trimmed back to the last record
     /// boundary so the next append lands in a consistent place.
-    Result replay(std::vector<WalRecord>& records);
+    Result replay(std::vector<WalRecord>& records, std::uint64_t checkpoint = 0);
 
     /// Number of bytes discarded by the last replay() because they formed an
     /// incomplete trailing record. Zero when the log ended cleanly.
@@ -122,11 +122,12 @@ public:
         return discarded_tail_bytes_;
     }
 
-    /// Empties the log and restarts sequence numbering.
+    /// Empties the log; the next append uses checkpoint + 1.
+    /// Database passes the installed checkpoint. Default zero is for standalone logs.
     ///
     /// Only safe to call once a snapshot containing every logged mutation has
     /// been installed. Database::save enforces that ordering.
-    Result reset();
+    Result reset(std::uint64_t checkpoint = 0);
 
 private:
     /// Shared by the three append_* entry points.

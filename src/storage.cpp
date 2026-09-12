@@ -114,7 +114,8 @@ bool StorageManager::snapshot_exists() const {
     return fs::is_regular_file(path_, ignored);
 }
 
-Result StorageManager::save(const std::vector<Record>& records) const {
+Result StorageManager::save(const std::vector<Record>& records,
+                            std::optional<std::uint64_t> checkpoint) const {
     if (records.size() > limits::kMaxRecordCount) {
         return Result::failure(StatusCode::InvalidArgument,
                                "too many records to store in one snapshot");
@@ -123,7 +124,7 @@ Result StorageManager::save(const std::vector<Record>& records) const {
     // Refuse to write a file that load() would reject. Without this a value
     // that slipped past the database's own checks would produce a snapshot
     // that cannot be read back -- a far worse failure than declining to save.
-    std::uintmax_t encoded_size = kHeaderSize;
+    std::uintmax_t encoded_size = checkpoint ? kCheckpointHeaderSize : kHeaderSize;
     for (const Record& record : records) {
         if (record.key.empty() || record.key.size() > limits::kMaxKeySize) {
             return Result::failure(StatusCode::KeyTooLarge,
@@ -163,14 +164,21 @@ Result StorageManager::save(const std::vector<Record>& records) const {
         // the end by seeking back, which avoids either encoding every record
         // twice or holding the whole encoded payload in memory.
         std::string header;
-        header.reserve(kHeaderSize);
+        header.reserve(checkpoint ? kCheckpointHeaderSize : kHeaderSize);
         header.append(kMagic, sizeof(kMagic));
-        detail::append_u32(header, kFormatVersion);
+        detail::append_u32(header, checkpoint ? kCheckpointVersion : kFormatVersion);
         detail::append_u64(header, static_cast<std::uint64_t>(records.size()));
         detail::append_u32(header, 0);
+        if (checkpoint) {
+            detail::append_u64(header, *checkpoint);
+        }
         out.write(header.data(), static_cast<std::streamsize>(header.size()));
 
         std::uint32_t crc = detail::kCrcInitial;
+        if (checkpoint) {
+            crc = detail::crc32_update(crc, header.data(), kChecksumOffset);
+            crc = detail::crc32_update(crc, header.data() + kHeaderSize, 8);
+        }
         std::string encoded;
         for (const Record& record : records) {
             encoded.clear();
@@ -212,8 +220,11 @@ Result StorageManager::save(const std::vector<Record>& records) const {
     return Result::ok();
 }
 
-Result StorageManager::load(std::vector<Record>& records) const {
+Result StorageManager::load(std::vector<Record>& records, std::uint64_t* checkpoint) const {
     records.clear();
+    if (checkpoint != nullptr) {
+        *checkpoint = 0;
+    }
 
     std::error_code error;
     const bool present = fs::exists(path_, error);
@@ -258,13 +269,21 @@ Result StorageManager::load(std::vector<Record>& records) const {
     }
 
     const std::uint32_t version = detail::read_u32(header.data() + kVersionOffset);
-    if (version != kFormatVersion) {
+    if (version != kFormatVersion && version != kCheckpointVersion) {
         return Result::failure(StatusCode::UnsupportedVersion,
                                "snapshot format version " + std::to_string(version) +
                                    " is not supported (this build reads version " +
-                                   std::to_string(kFormatVersion) + ")");
+                                   std::to_string(kFormatVersion) + " and 2)");
     }
 
+    std::array<char, 8> checkpoint_bytes{};
+    const bool has_checkpoint = version == kCheckpointVersion;
+    if (has_checkpoint && !read_exact(in, checkpoint_bytes.data(), checkpoint_bytes.size())) {
+        return truncated("the checkpoint");
+    }
+    const std::uint64_t saved_sequence =
+        has_checkpoint ? detail::read_u64(checkpoint_bytes.data()) : 0;
+    const std::size_t header_size = has_checkpoint ? kCheckpointHeaderSize : kHeaderSize;
     const std::uint64_t record_count = detail::read_u64(header.data() + kRecordCountOffset);
     const std::uint32_t stored_checksum = detail::read_u32(header.data() + kChecksumOffset);
 
@@ -276,7 +295,7 @@ Result StorageManager::load(std::vector<Record>& records) const {
     // The count is compared against the space actually available before it is
     // trusted for anything. Dividing rather than multiplying keeps the check
     // free of overflow.
-    const std::uint64_t payload_bytes = static_cast<std::uint64_t>(file_size) - kHeaderSize;
+    const std::uint64_t payload_bytes = static_cast<std::uint64_t>(file_size) - header_size;
     if (record_count > payload_bytes / kMinRecordBytes) {
         return Result::failure(StatusCode::CorruptData,
                                "snapshot claims " + std::to_string(record_count) +
@@ -297,6 +316,10 @@ Result StorageManager::load(std::vector<Record>& records) const {
     HashTable<Key, bool> seen(static_cast<std::size_t>(record_count) + 1);
 
     std::uint32_t crc = detail::kCrcInitial;
+    if (has_checkpoint) {
+        crc = detail::crc32_update(crc, header.data(), kChecksumOffset);
+        crc = detail::crc32_update(crc, checkpoint_bytes.data(), checkpoint_bytes.size());
+    }
     std::uint64_t consumed = 0;
 
     for (std::uint64_t index = 0; index < record_count; ++index) {
@@ -366,6 +389,9 @@ Result StorageManager::load(std::vector<Record>& records) const {
     }
 
     records = std::move(parsed);
+    if (checkpoint != nullptr) {
+        *checkpoint = saved_sequence;
+    }
     return Result::ok();
 }
 

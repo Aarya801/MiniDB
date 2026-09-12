@@ -78,7 +78,8 @@ Result Database::load() {
 
     // Step 1: the snapshot, which is the state as of the last successful save.
     std::vector<Record> records;
-    Result read = storage_->load(records);
+    std::uint64_t checkpoint = 0;
+    Result read = storage_->load(records, &checkpoint);
     if (!read.is_ok() && read.code() != StatusCode::NotFound) {
         // Corrupt, unsupported or unreadable. Leave the database untouched
         // and let the caller decide; silently continuing with no data would
@@ -96,7 +97,7 @@ Result Database::load() {
 
     // Step 2: the log, which holds everything done since that snapshot.
     std::vector<WalRecord> logged;
-    Result replayed = wal_->replay(logged);
+    Result replayed = wal_->replay(logged, checkpoint);
     if (!replayed.is_ok() && replayed.code() != StatusCode::NotFound) {
         // A damaged log is not an empty log. Refusing here keeps the files on
         // disk exactly as they are, so nothing recoverable is destroyed.
@@ -137,7 +138,8 @@ Result Database::save() {
     entries_.for_each(
         [&records](const Key& key, const Value& value) { records.push_back(Record{key, value}); });
 
-    Result saved = storage_->save(records);
+    const std::uint64_t checkpoint = wal_->last_sequence();
+    Result saved = storage_->save(records, checkpoint);
     if (!saved.is_ok()) {
         // The snapshot did not happen, so the log is still the only record of
         // these mutations. Resetting it here would destroy them.
@@ -145,7 +147,7 @@ Result Database::save() {
     }
 
     // Only now, with the snapshot safely in place, is the log redundant.
-    Result reset = wal_->reset();
+    Result reset = wal_->reset(checkpoint);
     if (!reset.is_ok()) {
         loaded_ = false;
     }

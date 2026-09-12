@@ -1,12 +1,12 @@
 # Snapshot Format
 
-The snapshot format introduced in Milestone 3 and retained in Milestone 4.
+Version 1 was introduced in Milestone 3; Milestone 5 adds version 2 checkpoints.
 
 A snapshot is the entire database in one file. Saving rewrites the whole file;
 loading reads the whole file. Milestone 4 adds a separate [WAL](WAL.md);
-the snapshot format is unchanged.
+version 2 records which WAL operations the snapshot includes.
 
-- **Format version:** 1
+- **Format versions:** 1 (legacy), 2 (Database saves with a checkpoint)
 - **Default location:** `%LOCALAPPDATA%\MiniDB\minidb.snapshot` on Windows,
   `$XDG_DATA_HOME/minidb/minidb.snapshot` or
   `$HOME/.local/share/minidb/minidb.snapshot` elsewhere
@@ -25,7 +25,7 @@ versa. There is no `reinterpret_cast` in the reader or the writer.
 explicit length and no terminator, so any byte — including `0x00` — is valid
 data. Nothing is assumed about their encoding.
 
-## Layout
+## Version 1 layout
 
 ```text
 ┌─────────────────────────────────────────────┐
@@ -59,7 +59,7 @@ Records follow the header back to back, with no padding or alignment.
 
 | Offset | Size | Field | Value |
 | --- | --- | --- | --- |
-| +0 | 4 | `key_length` | `uint32` — 1 to 1048576 |
+| +0 | 4 | `key_length` | `uint32` — 1 to 1024 |
 | +4 | 4 | `value_length` | `uint32` — 0 to 1048576 |
 | +8 | `key_length` | `key` | raw bytes |
 | +8 + `key_length` | `value_length` | `value` | raw bytes |
@@ -266,6 +266,24 @@ than misread. A reader that meets a version it does not know returns
 file may be perfectly well formed, just written by a newer MiniDB, and the user
 deserves to be told the difference.
 
-There is no migration path yet. Version 1 is the first format, so there is
-nothing to migrate from, and inventing an upgrade framework before a second
-version exists would be speculation.
+Version-1 snapshots are still readable. The low-level writer without a checkpoint
+still produces version 1. Database::save supplies a checkpoint and writes
+version 2; old builds reject it as UnsupportedVersion.
+
+## Version 2 checkpoint extension
+
+The first 24 bytes retain the offsets above, with version set to 2. Bytes
+24–31 hold an unsigned little-endian uint64 checkpoint: the highest WAL sequence
+represented in the snapshot. The record region begins at offset 32 and uses the
+same lengths and data layout. An empty snapshot is 32 bytes.
+
+The CRC at offset 20 covers bytes 0–19, then checkpoint bytes 24–31, then all
+record bytes. It excludes only its own field. Thus corrupting the checkpoint
+cannot silently change which operations recovery applies without a checksum
+failure (subject to CRC collision limitations). The writer computes this CRC
+incrementally and patches it before flush/close and replacement.
+
+The reader validates the complete snapshot before returning a checkpoint.
+On failure, the output records are empty and the checkpoint output is zero.
+Version 1 yields checkpoint zero. The 256 MiB size cap includes the larger
+header. See [WAL.md](WAL.md) for checkpoint-aware replay and legacy limitations.

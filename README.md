@@ -10,7 +10,7 @@ be read and understood in an afternoon. It is not a production database, and the
 
 > **Current state:** MiniDB stores data on disk and reloads it on startup.
 > SET, DELETE, and CLEAR are logged and flushed to the OS before changing memory.
-> Startup loads the snapshot and replays the WAL. Power-loss durability is not provided.
+> Startup loads the snapshot and replays only WAL operations newer than its checkpoint. Power-loss durability is not provided.
 
 ## Status
 
@@ -21,7 +21,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 2** — custom hash table with separate chaining
 - [x] **Milestone 3** — persistent binary snapshots with atomic replacement
 - [x] **Milestone 4** — write-ahead log and startup replay
-- [ ] Milestone 5 — crash recovery
+- [x] **Milestone 5** — checkpoint-aware crash recovery
 - [ ] Milestone 6 — LRU cache
 - [ ] Milestone 7 — transactions
 - [ ] Milestone 8 — concurrency
@@ -166,7 +166,7 @@ reader never sees a half-written file. The format is documented byte by byte
 in [docs/STORAGE_FORMAT.md](docs/STORAGE_FORMAT.md).
 
 **Recovery.** Each mutation is appended to `<snapshot>.wal` and flushed to the
-OS before changing memory. Startup loads the snapshot and replays the WAL.
+OS before changing memory. Startup loads the snapshot and replays only WAL operations newer than its checkpoint.
 An incomplete final record is trimmed; complete corrupt records are refused.
 Saving installs the complete snapshot before resetting the WAL. See
 [WAL format and recovery policy](docs/WAL.md), including tail-repair ambiguity.
@@ -174,7 +174,14 @@ Saving installs the complete snapshot before resetting the WAL. See
 **Durability limits.** Successful flushes support recovery after process
 termination while the OS remains healthy. MiniDB does not call `fsync` or
 `FlushFileBuffers`, and does not guarantee recovery after power loss or OS
-failure. No full ACID or production-grade guarantees are claimed.
+failure. This educational single-process database has no distributed recovery or
+multi-process coordination. No full ACID or production-grade guarantees are claimed.
+
+For example: snapshot `a=1,b=2` → log `DELETE a; SET c 3` → restart →
+load snapshot → replay newer records → recover exactly `b=2,c=3`.
+Snapshots now include a checksum-protected checkpoint, so a restart between
+snapshot replacement and WAL reset skips operations already saved. Legacy
+version-1 snapshots remain readable; the next save upgrades them to version 2.
 
 ## Architecture
 
@@ -291,6 +298,7 @@ ctest --test-dir build -R test_database -V
 
 | Suite | Covers |
 | --- | --- |
+| `test_recovery` / `test_recovery_process` | Checkpoints, legacy files, malformed recovery inputs, truncated tails, abrupt subprocess exit and CLI restart |
 | `test_wal` | Binary encoding, replay, torn tails, corruption, length limits, failed I/O, snapshot/reset ordering, restart recovery |
 | `test_storage` | Round trips, corrupt magic, bad version, truncation at every offset, invalid lengths, overflow attempts, duplicate keys, checksum failures, scratch-file cleanup |
 | `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
@@ -304,7 +312,7 @@ third-party library. The reasoning is in
 
 ## Limitations
 
-As of Milestone 4, MiniDB does **not**:
+As of Milestone 5, MiniDB does **not**:
 
 - Guarantee durability against power loss. Saves are not `fsync`ed.
 - Update the snapshot incrementally. Every save rewrites the whole file, so

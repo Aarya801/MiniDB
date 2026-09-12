@@ -1,7 +1,8 @@
-# Write-Ahead Log (Milestone 4)
+# Write-Ahead Log and Crash Recovery (Milestones 4–5)
 
-MiniDB keeps `<snapshot>` and `<snapshot>.wal`. The snapshot format remains
-version 1. The WAL records SET, DELETE, and the existing CLEAR operation.
+MiniDB keeps `<snapshot>` and `<snapshot>.wal`. Database saves now use a
+version-2 snapshot with a checkpoint; version-1 snapshots remain readable.
+The WAL layout remains version 1 and records SET, DELETE, and CLEAR.
 This is an educational, single-owner database; it does not provide full ACID.
 
 ## Binary format, version 1
@@ -15,7 +16,7 @@ writing C++ structs. Keys and values are opaque bytes, including embedded NULs.
 | 0 | 4 | Magic: ASCII `MWAL` |
 | 4 | 2 | Version: 1 |
 | 6 | 2 | Operation: SET=1, DELETE=2, CLEAR=3 |
-| 8 | 8 | Sequence: starts at 1, increases by exactly 1 |
+| 8 | 8 | Sequence: monotonic; resumes at checkpoint + 1 after reset |
 | 16 | 4 | Key length |
 | 20 | 4 | Value length |
 | 24 | 4 | CRC-32 |
@@ -32,7 +33,9 @@ SET requires a key of 1–1024 bytes and a value of 0–1048576 bytes. DELETE
 requires a key of 1–1024 bytes and zero value bytes. CLEAR requires both
 lengths to be zero. WAL files are limited to 256 MiB on both append and replay.
 Append refuses to exceed that limit; save a snapshot to reset the WAL.
-Sequences restart at 1 after reset and cannot wrap.
+Database sequences continue from the snapshot checkpoint after reset and cannot
+wrap. Direct WAL callers pass the checkpoint to replay/reset; omitting it retains
+the original standalone behavior (checkpoint zero).
 
 ## Write path and durability
 
@@ -64,8 +67,8 @@ or failed tail before appending, or reset only after installing its snapshot.
 
 ## Recovery
 
-`Database::load()` reads the snapshot into a temporary table, then replays the
-WAL directly into that table without logging again. It publishes the recovered
+`Database::open()` (also available as `load()`) reads the snapshot into a temporary table, then replays the
+WAL operations newer than its checkpoint directly into that table without logging again. It publishes the recovered
 table only on success. Missing snapshot means start from an empty table;
 missing WAL means no additional mutations. Both missing is a normal first run.
 A present empty WAL is valid. A corrupt snapshot is refused even if the WAL
@@ -102,17 +105,49 @@ are preserved and no partially parsed record vector is returned.
 Save first serializes and validates the complete current state, writes the
 snapshot to its sibling `.tmp` file, flushes and explicitly closes it, and
 renames it over the snapshot. Only after successful replacement does it
-truncate the WAL to zero bytes and reset sequence numbering.
+truncate the WAL to zero bytes. The next sequence is checkpoint + 1.
+
+The snapshot checkpoint is the highest sequence represented by its state.
+Version 2 includes that number in the snapshot CRC, alongside its header fields
+and payload. A crash before snapshot replacement leaves the prior snapshot and
+WAL available. A crash after replacement but before reset leaves a checkpoint
+that tells recovery which old records to skip. A crash after reset leaves the
+snapshot and an empty WAL. No checkpointed operation is applied to the table.
+
+All complete WAL records, including skipped ones, still undergo structural and
+CRC validation. The first sequence must be positive and no greater than
+checkpoint + 1 (checked without overflowing). Records must then be contiguous;
+a jump directly to checkpoint + 1 is also allowed when it skips only operations
+already covered by the snapshot. Missing operations newer than the checkpoint,
+duplicates, and backwards sequences are refused. Empty/missing WALs resume
+from the checkpoint. Skipped records are not included in
+`replayed_operation_count()`.
 
 A failed snapshot leaves the WAL untouched. If WAL reset fails, save reports
-the failure even though the snapshot has been installed, and forces recovery
-before another mutation or save. If the process stops between snapshot
-replacement and reset, recovery may replay the old WAL over the new snapshot.
-This is safe for this operation set: the entire ordered sequence of absolute
-SET, DELETE, and CLEAR operations is idempotent. Intermediate replay state is
-never published. After a successful save the WAL is empty, so no old operations
-are replayed on reopening. This reasoning would not apply to an increment
-operation; adding one would require a checkpoint/generation scheme.
+failure even though the snapshot is installed, and forces recovery before
+another mutation or save. The checkpoint makes that recovery skip already
+saved mutations. Sequence exhaustion reports an error; saving does not reset
+the lifetime sequence space.
+
+### Opening and legacy files
+
+The CLI calls `Database::open()` before accepting commands. Library users can
+call open/load to obtain a Result before reading; the existing lazy recovery
+before the first mutation/save remains. The constructor does not load records.
+
+A version-1 snapshot has no checkpoint, so recovery treats it as checkpoint
+zero and follows Milestone 4 replay semantics. If an old process stopped between
+snapshot replacement and WAL reset, it is impossible to identify included
+operations from those legacy bytes. That one legacy recovery may reapply them;
+absolute SET/DELETE/CLEAR preserve the final state. The next successful save
+writes version 2 and establishes the checkpoint. Older MiniDB builds reject
+version 2 rather than misreading it. Standalone `StorageManager::save(records)`
+retains the version-1 writer; passing a checkpoint writes version 2.
+
+Example: save `a=1, b=2` at checkpoint 2, then append `DELETE a` (3) and
+`SET c 3` (4). Restart loads `{a=1,b=2}`, replays only 3 and 4, and publishes
+exactly `{b=2,c=3}`. Save records checkpoint 4 and empties the WAL. Reopening
+then replays zero operations.
 
 The two files have no shared generation identifier. Do not mix snapshots and
 WALs from different databases or backup times, delete one to repair the other,
@@ -128,4 +163,7 @@ on total WAL bytes and operations. The 256 MiB disk cap does not imply a 256 MiB
 RAM cap: record objects, strings, and hash-table nodes add overhead. Snapshots
 remain whole-file saves. There is no file locking, concurrent writer support,
 transaction protocol, background checkpointing, log rotation, or production
-storage guarantee. Milestone 5 and later are not implemented here.
+storage guarantee. This is an educational single-process database with no
+distributed recovery, multi-process coordination, or full ACID claim.
+OS flush is not guaranteed physical power-loss durability. Milestone 6 and
+later are not implemented here.

@@ -580,3 +580,50 @@ Durability is a checked stream flush and close to the OS. There is no device or
 directory sync, power-loss guarantee, file locking, transaction guarantee, or
 future milestone implementation. Opening per append and retaining decoded WAL
 records during replay favor readable lifecycle management over performance.
+
+## Milestone 5: checkpoint-aware crash recovery
+
+Milestone 4 recovered the correct final state by replaying idempotent operations,
+but could reapply records already installed in a snapshot if reset was
+interrupted. Milestone 5 adds a uint64 checkpoint in a version-2 snapshot;
+the CRC covers the checkpoint, header metadata, and payload. WAL record bytes
+remain unchanged, and sequence numbers continue across Database saves.
+
+Recovery is snapshot → validated WAL → skip sequences through checkpoint →
+apply newer operations into a temporary table → publish recovered state.
+All complete records are checked, even skipped ones. Truncated final records
+retain the documented Milestone 4 salvage policy; invalid complete records
+fail recovery without publishing partial state. A first WAL record cannot
+skip a post-checkpoint operation; sequence gaps are allowed only when jumping
+past already checkpointed operations to checkpoint + 1.
+
+`Database::open()` names the existing load/recovery entry point explicitly, and
+the CLI invokes it before accepting commands. Existing load and lazy recovery
+before mutation/save remain supported. No separate recovery manager is needed:
+Database already coordinates StorageManager and WriteAheadLog.
+
+Save atomically installs the snapshot and checkpoint before truncating the WAL.
+Failure to reset reports an error; reopening uses the installed checkpoint.
+A missing or empty WAL resumes sequencing from that checkpoint. Uninstalled
+`.tmp` files are ignored; there is only one authoritative snapshot path, and
+a corrupt snapshot is refused rather than silently falling back or starting
+empty. No automatic recovery of deleted files is attempted.
+
+Version-1 snapshots remain readable with checkpoint zero. Their bytes cannot
+identify records already saved before a legacy crash; one legacy replay retains
+Milestone 4 idempotent semantics. The next save upgrades to version 2. Existing
+low-level StorageManager callers may still write version 1 by omitting the
+checkpoint. Direct WAL clients must supply the matching checkpoint to replay
+and reset. A 64-bit sequence is never allowed to wrap.
+
+Focused tests cover exact states, skipped operations, checkpoint corruption,
+legacy files, repeated saves, invalid WAL fields, and all cuts in final records.
+A subprocess fixture uses std::_Exit to skip destructors after writes, after
+snapshot installation, and after reset; separate processes and the real CLI
+then verify recovery. It simulates process termination, not power loss.
+
+This remains an educational single-process database: no distributed recovery,
+multi-process coordination, full ACID, or future milestone work. OS stream
+flush is not guaranteed physical power-loss durability. There is no database
+identity in the WAL: files from unrelated databases or backup times must not be
+mixed. A checkpoint cannot detect such a mix when sequence numbers coincide.

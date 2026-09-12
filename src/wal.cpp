@@ -1,5 +1,6 @@
 #include "minidb/wal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -160,7 +161,7 @@ Result WriteAheadLog::append(WalOperation operation, std::string_view key, std::
     }
 
     if (last_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
-        return Result::failure(StatusCode::Internal, "log sequence exhausted; save a snapshot");
+        return Result::failure(StatusCode::Internal, "log sequence exhausted");
     }
     const std::uint64_t sequence = last_sequence_ + 1;
     const std::string record = encode_record(operation, sequence, key, value);
@@ -220,7 +221,7 @@ Result WriteAheadLog::append(WalOperation operation, std::string_view key, std::
     return Result::ok();
 }
 
-Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
+Result WriteAheadLog::replay(std::vector<WalRecord>& records, std::uint64_t checkpoint) {
     records.clear();
     discarded_tail_bytes_ = 0;
     tail_known_ = false;
@@ -233,7 +234,7 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
     if (!present) {
         // Nothing logged since the last snapshot. Not a failure: this is the
         // normal state of a database that exited cleanly.
-        last_sequence_ = 0;
+        last_sequence_ = checkpoint;
         tail_known_ = true;
         return Result::failure(StatusCode::NotFound, "no write-ahead log at " + path_.string());
     }
@@ -263,7 +264,7 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
     const std::uint64_t total = static_cast<std::uint64_t>(file_size);
     std::uint64_t offset = 0;
     std::uint64_t last_boundary = 0;
-    std::uint64_t expected_sequence = kFirstSequence;
+    std::uint64_t previous_sequence = 0;
 
     while (offset < total) {
         const std::uint64_t remaining = total - offset;
@@ -310,7 +311,15 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
         const std::uint32_t value_length = detail::read_u32(header.data() + kValueLengthOffset);
         const std::uint32_t stored_checksum = detail::read_u32(header.data() + kChecksumOffset);
 
-        if (sequence != expected_sequence) {
+        // A crash before reset can leave a checkpointed prefix. Never allow
+        // the first record to skip an operation after the snapshot.
+        const bool first_valid =
+            sequence > 0 && (sequence <= checkpoint || sequence - 1 == checkpoint);
+        const bool next_valid = previous_sequence != std::numeric_limits<std::uint64_t>::max() &&
+                                (sequence == previous_sequence + 1 ||
+                                 (previous_sequence <= checkpoint && sequence > checkpoint &&
+                                  sequence - 1 == checkpoint));
+        if ((offset == 0 && !first_valid) || (offset != 0 && !next_valid)) {
             return Result::failure(StatusCode::CorruptData, "unexpected log sequence number");
         }
 
@@ -361,10 +370,12 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
                 "log record at byte " + std::to_string(offset) + " fails its checksum");
         }
 
-        parsed.push_back(std::move(record));
+        if (sequence > checkpoint) {
+            parsed.push_back(std::move(record));
+        }
+        previous_sequence = sequence;
         offset += kRecordHeaderSize + payload_bytes;
         last_boundary = offset;
-        ++expected_sequence;
     }
 
     if (last_boundary != total) {
@@ -383,12 +394,12 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records) {
     }
 
     records = std::move(parsed);
-    last_sequence_ = records.empty() ? 0 : records.back().sequence;
+    last_sequence_ = std::max(checkpoint, previous_sequence);
     tail_known_ = true;
     return Result::ok();
 }
 
-Result WriteAheadLog::reset() {
+Result WriteAheadLog::reset(std::uint64_t checkpoint) {
     tail_known_ = false;
     std::error_code error;
     const bool present = fs::exists(path_, error);
@@ -409,7 +420,7 @@ Result WriteAheadLog::reset() {
         }
     }
 
-    last_sequence_ = 0;
+    last_sequence_ = checkpoint;
     discarded_tail_bytes_ = 0;
     tail_known_ = true;
     return Result::ok();

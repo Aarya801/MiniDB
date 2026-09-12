@@ -246,7 +246,7 @@ TEST(snapshot_wal_save_reset_and_second_restart) {
     EXPECT_FALSE(final.exists("base"));
     EXPECT_TRUE(final.exists("new"));
 }
-TEST(snapshot_installed_before_reset_replays_idempotently) {
+TEST(snapshot_installed_before_reset_skips_checkpointed_records) {
     const TempDirectory dir;
     const auto path = dir.file("db");
     Database db(path);
@@ -257,11 +257,12 @@ TEST(snapshot_installed_before_reset_replays_idempotently) {
     ASSERT_TRUE(db.set("drop", "value").is_ok());
     ASSERT_TRUE(db.remove("drop").is_ok());
     // Simulate the process stopping after snapshot replacement, before reset.
-    ASSERT_TRUE(minidb::StorageManager(path).save({{"final", "value"}}).is_ok());
+    ASSERT_TRUE(minidb::StorageManager(path).save({{"final", "value"}}, 5).is_ok());
     Database recovered(path);
     ASSERT_TRUE(recovered.load().is_ok());
     EXPECT_EQ(recovered.size(), std::size_t{1});
     EXPECT_EQ(recovered.get("final").value(), std::string("value"));
+    EXPECT_EQ(recovered.replayed_operation_count(), std::size_t{0});
     ASSERT_TRUE(recovered.save().is_ok());
     EXPECT_EQ(read_file(recovered.wal_path()), std::string{});
 }
