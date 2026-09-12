@@ -2,16 +2,15 @@
 
 An educational persistent key-value database engine built from scratch in modern C++20.
 
-MiniDB is a learning project. It implements the mechanisms a real storage engine
+MiniDB is a learning project. It develops the mechanisms a real storage engine
 depends on — a hash table, a binary on-disk format, a write-ahead log, crash
-recovery, an LRU cache, transactions and thread-safe access — at a size that can
+recovery, with an LRU cache, transactions and thread-safe access planned — at a size that can
 be read and understood in an afternoon. It is not a production database, and the
 [Limitations](#limitations) section says plainly what it does not do.
 
 > **Current state:** MiniDB stores data on disk and reloads it on startup.
-> Persistence is snapshot-based: the whole database is written when a session
-> ends normally. Kill the process mid-session and changes made since startup
-> are lost — the write-ahead log in Milestone 4 is what closes that gap.
+> SET, DELETE, and CLEAR are logged and flushed to the OS before changing memory.
+> Startup loads the snapshot and replays the WAL. Power-loss durability is not provided.
 
 ## Status
 
@@ -21,7 +20,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 1** — in-memory database, command parser, interactive CLI
 - [x] **Milestone 2** — custom hash table with separate chaining
 - [x] **Milestone 3** — persistent binary snapshots with atomic replacement
-- [ ] Milestone 4 — write-ahead log
+- [x] **Milestone 4** — write-ahead log and startup replay
 - [ ] Milestone 5 — crash recovery
 - [ ] Milestone 6 — LRU cache
 - [ ] Milestone 7 — transactions
@@ -42,7 +41,7 @@ Built in milestones, each one a working program.
 | `EXIT` | Saves and ends the session. End-of-input works too. |
 
 Command names are case-insensitive; keys and values are not. The database is
-read at startup and written back when the session ends.
+recovered at startup; mutations are logged immediately and a snapshot is saved on exit.
 
 ## Requirements
 
@@ -166,16 +165,16 @@ database, then renames it over the original in one filesystem operation, so a
 reader never sees a half-written file. The format is documented byte by byte
 in [docs/STORAGE_FORMAT.md](docs/STORAGE_FORMAT.md).
 
-**What is guaranteed.** A reader never observes a partial snapshot. If MiniDB
-fails or is killed while saving, the previous snapshot is left untouched. A
-damaged snapshot is detected — by magic number, version, size limits, length
-checks and a CRC-32 — and refused, never silently read as an empty database.
+**Recovery.** Each mutation is appended to `<snapshot>.wal` and flushed to the
+OS before changing memory. Startup loads the snapshot and replays the WAL.
+An incomplete final record is trimmed; complete corrupt records are refused.
+Saving installs the complete snapshot before resetting the WAL. See
+[WAL format and recovery policy](docs/WAL.md), including tail-repair ambiguity.
 
-**What is not.** MiniDB does not call `fsync`, so a successful save is not
-proof against power loss. More importantly, changes are only written when the
-session ends: kill the process mid-session and everything since startup is
-gone. That is the defining limit of snapshot-only persistence, and Milestone 4
-addresses it.
+**Durability limits.** Successful flushes support recovery after process
+termination while the OS remains healthy. MiniDB does not call `fsync` or
+`FlushFileBuffers`, and does not guarantee recovery after power loss or OS
+failure. No full ACID or production-grade guarantees are claimed.
 
 ## Architecture
 
@@ -190,13 +189,15 @@ flowchart TD
 
     Database --> Storage[StorageManager]
     Storage --> Snapshot[(Binary snapshot)]
+    Database --> WAL[WriteAheadLog]
+    WAL --> Log[(Binary WAL)]
 
     classDef planned stroke-dasharray: 4 4
 ```
 
 Solid arrows exist today; dashed boxes are later milestones.
 
-Three pieces, each with one job:
+Each component has one job:
 
 - **`cli/main.cpp`** — reads lines, prints replies, and nothing else. It owns
   the wording of `OK`, `true`/`false` and the sorted `KEYS` output.
@@ -207,6 +208,7 @@ Three pieces, each with one job:
   about keys being strings or values being database entries.
 - **`StorageManager`** — turns records into bytes and back, and owns every
   rule about what a valid snapshot is. Knows nothing about hash tables.
+- **`WriteAheadLog`** — appends, validates, replays, and resets mutation records.
 
 Both the parser and the database report problems through the same `Result` /
 `StatusCode` pair from Milestone 0, so the CLI has one error model to render.
@@ -289,6 +291,7 @@ ctest --test-dir build -R test_database -V
 
 | Suite | Covers |
 | --- | --- |
+| `test_wal` | Binary encoding, replay, torn tails, corruption, length limits, failed I/O, snapshot/reset ordering, restart recovery |
 | `test_storage` | Round trips, corrupt magic, bad version, truncation at every offset, invalid lengths, overflow attempts, duplicate keys, checksum failures, scratch-file cleanup |
 | `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
 | `test_database` | Every operation, empty state, overwrites, size limits, binary values, 1000-key stress |
@@ -301,10 +304,8 @@ third-party library. The reasoning is in
 
 ## Limitations
 
-As of Milestone 3, MiniDB does **not**:
+As of Milestone 4, MiniDB does **not**:
 
-- Survive a crash mid-session. Only a clean exit writes to disk, so a killed
-  process loses everything since startup. Milestone 4 adds the write-ahead log.
 - Guarantee durability against power loss. Saves are not `fsync`ed.
 - Update the snapshot incrementally. Every save rewrites the whole file, so
   saving is O(n) however small the change.
@@ -325,6 +326,7 @@ And it is not intended to ever implement:
 
 ## Documentation
 
+- [WAL format and recovery](docs/WAL.md) — mutation records, durability, and limitations
 - [Storage format](docs/STORAGE_FORMAT.md) — the snapshot layout, byte by byte
 - [Design decisions](docs/DESIGN_DECISIONS.md) — why things are built the way they are
 - [Learning notes](docs/LEARNING_NOTES.md) — the concepts behind the code, explained from scratch

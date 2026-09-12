@@ -69,11 +69,13 @@ endif()
 # tests and the benchmarks link against exactly the same code the CLI runs.
 # --------------------------------------------------------------------------
 add_library(minidb_core STATIC
+    src/binary_format.cpp
     src/command_parser.cpp
     src/database.cpp
     src/hash_table.cpp
     src/result.cpp
-    src/storage.cpp)
+    src/storage.cpp
+    src/wal.cpp)
 
 target_include_directories(minidb_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

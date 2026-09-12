@@ -8,6 +8,8 @@
 #include <string>
 #include <utility>
 
+#include "binary_format.hpp"
+
 #include "minidb/hash_table.hpp"
 
 namespace minidb {
@@ -26,79 +28,6 @@ constexpr std::size_t kChecksumOffset = 20;
 /// two length fields plus at least one byte of key. Used to reject a record
 /// count that could not possibly fit in the file.
 constexpr std::uint64_t kMinRecordBytes = 9;
-
-// -------------------------------------------------------------------------
-// Little-endian encoding
-//
-// Integers are written byte by byte, least significant first, rather than by
-// copying the bytes of the in-memory value. That makes a snapshot written on
-// one machine readable on another regardless of the CPU's byte order, and it
-// is why there is no reinterpret_cast anywhere in this file.
-// -------------------------------------------------------------------------
-
-void append_u32(std::string& out, std::uint32_t value) {
-    for (int shift = 0; shift < 32; shift += 8) {
-        out.push_back(static_cast<char>((value >> shift) & 0xFFU));
-    }
-}
-
-void append_u64(std::string& out, std::uint64_t value) {
-    for (int shift = 0; shift < 64; shift += 8) {
-        out.push_back(static_cast<char>((value >> shift) & 0xFFU));
-    }
-}
-
-[[nodiscard]] std::uint32_t read_u32(const char* bytes) noexcept {
-    std::uint32_t value = 0;
-    for (int index = 3; index >= 0; --index) {
-        value <<= 8;
-        value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[index]));
-    }
-    return value;
-}
-
-[[nodiscard]] std::uint64_t read_u64(const char* bytes) noexcept {
-    std::uint64_t value = 0;
-    for (int index = 7; index >= 0; --index) {
-        value <<= 8;
-        value |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[index]));
-    }
-    return value;
-}
-
-// -------------------------------------------------------------------------
-// CRC-32
-//
-// The standard CRC-32 (IEEE 802.3, reflected polynomial 0xEDB88320) over
-// every payload byte. Computed without a lookup table: eight shifts per byte
-// is more than fast enough next to the cost of the disk I/O, and it keeps the
-// implementation short enough to read.
-//
-// What it buys: the magic number catches a file that is not a snapshot, and
-// the length checks catch a structurally broken one, but neither notices a
-// single flipped bit inside a key or a value. The checksum does.
-// -------------------------------------------------------------------------
-
-constexpr std::uint32_t kCrcInitial = 0xFFFFFFFFU;
-
-[[nodiscard]] std::uint32_t crc32_update(std::uint32_t crc, const char* data,
-                                         std::size_t length) noexcept {
-    for (std::size_t index = 0; index < length; ++index) {
-        crc ^= static_cast<std::uint32_t>(static_cast<unsigned char>(data[index]));
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = ((crc & 1U) != 0U) ? ((crc >> 1) ^ 0xEDB88320U) : (crc >> 1);
-        }
-    }
-    return crc;
-}
-
-[[nodiscard]] std::uint32_t crc32_update(std::uint32_t crc, const std::string& data) noexcept {
-    return crc32_update(crc, data.data(), data.size());
-}
-
-[[nodiscard]] std::uint32_t crc32_finish(std::uint32_t crc) noexcept {
-    return crc ^ 0xFFFFFFFFU;
-}
 
 /// Removes a file when destroyed, unless it has been kept.
 ///
@@ -194,6 +123,7 @@ Result StorageManager::save(const std::vector<Record>& records) const {
     // Refuse to write a file that load() would reject. Without this a value
     // that slipped past the database's own checks would produce a snapshot
     // that cannot be read back -- a far worse failure than declining to save.
+    std::uintmax_t encoded_size = kHeaderSize;
     for (const Record& record : records) {
         if (record.key.empty() || record.key.size() > limits::kMaxKeySize) {
             return Result::failure(StatusCode::KeyTooLarge,
@@ -203,13 +133,18 @@ Result StorageManager::save(const std::vector<Record>& records) const {
             return Result::failure(StatusCode::ValueTooLarge,
                                    "record value exceeds the value size limit");
         }
+        const std::uintmax_t record_size = 8ULL + record.key.size() + record.value.size();
+        if (record_size > limits::kMaxSnapshotSize - encoded_size) {
+            return Result::failure(StatusCode::InvalidArgument, "snapshot exceeds the size limit");
+        }
+        encoded_size += record_size;
     }
 
     std::error_code error;
     const fs::path parent = path_.parent_path();
     if (!parent.empty()) {
         fs::create_directories(parent, error);
-        if (error && !fs::is_directory(parent)) {
+        if (error) {
             return Result::failure(StatusCode::IoError,
                                    "cannot create database directory: " + error.message());
         }
@@ -230,21 +165,21 @@ Result StorageManager::save(const std::vector<Record>& records) const {
         std::string header;
         header.reserve(kHeaderSize);
         header.append(kMagic, sizeof(kMagic));
-        append_u32(header, kFormatVersion);
-        append_u64(header, static_cast<std::uint64_t>(records.size()));
-        append_u32(header, 0);
+        detail::append_u32(header, kFormatVersion);
+        detail::append_u64(header, static_cast<std::uint64_t>(records.size()));
+        detail::append_u32(header, 0);
         out.write(header.data(), static_cast<std::streamsize>(header.size()));
 
-        std::uint32_t crc = kCrcInitial;
+        std::uint32_t crc = detail::kCrcInitial;
         std::string encoded;
         for (const Record& record : records) {
             encoded.clear();
-            append_u32(encoded, static_cast<std::uint32_t>(record.key.size()));
-            append_u32(encoded, static_cast<std::uint32_t>(record.value.size()));
+            detail::append_u32(encoded, static_cast<std::uint32_t>(record.key.size()));
+            detail::append_u32(encoded, static_cast<std::uint32_t>(record.value.size()));
             encoded.append(record.key);
             encoded.append(record.value);
 
-            crc = crc32_update(crc, encoded);
+            crc = detail::crc32_update(crc, encoded);
             out.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
             if (!out) {
                 return Result::failure(StatusCode::IoError,
@@ -253,11 +188,12 @@ Result StorageManager::save(const std::vector<Record>& records) const {
         }
 
         std::string checksum;
-        append_u32(checksum, crc32_finish(crc));
+        detail::append_u32(checksum, detail::crc32_finish(crc));
         out.seekp(static_cast<std::streamoff>(kChecksumOffset));
         out.write(checksum.data(), static_cast<std::streamsize>(checksum.size()));
 
         out.flush();
+        out.close();
         if (!out) {
             return Result::failure(StatusCode::IoError, "failed while finishing snapshot");
         }
@@ -280,7 +216,11 @@ Result StorageManager::load(std::vector<Record>& records) const {
     records.clear();
 
     std::error_code error;
-    if (!fs::exists(path_, error)) {
+    const bool present = fs::exists(path_, error);
+    if (error) {
+        return Result::failure(StatusCode::IoError, "cannot inspect snapshot: " + error.message());
+    }
+    if (!present) {
         // Not a failure for the caller: a database that has never been saved
         // simply starts empty.
         return Result::failure(StatusCode::NotFound, "no snapshot at " + path_.string());
@@ -317,7 +257,7 @@ Result StorageManager::load(std::vector<Record>& records) const {
                                "not a MiniDB snapshot (magic number does not match)");
     }
 
-    const std::uint32_t version = read_u32(header.data() + kVersionOffset);
+    const std::uint32_t version = detail::read_u32(header.data() + kVersionOffset);
     if (version != kFormatVersion) {
         return Result::failure(StatusCode::UnsupportedVersion,
                                "snapshot format version " + std::to_string(version) +
@@ -325,8 +265,8 @@ Result StorageManager::load(std::vector<Record>& records) const {
                                    std::to_string(kFormatVersion) + ")");
     }
 
-    const std::uint64_t record_count = read_u64(header.data() + kRecordCountOffset);
-    const std::uint32_t stored_checksum = read_u32(header.data() + kChecksumOffset);
+    const std::uint64_t record_count = detail::read_u64(header.data() + kRecordCountOffset);
+    const std::uint32_t stored_checksum = detail::read_u32(header.data() + kChecksumOffset);
 
     if (record_count > limits::kMaxRecordCount) {
         return Result::failure(StatusCode::CorruptData,
@@ -356,7 +296,7 @@ Result StorageManager::load(std::vector<Record>& records) const {
     // rather than silently collapsing to whichever record happens to be last.
     HashTable<Key, bool> seen(static_cast<std::size_t>(record_count) + 1);
 
-    std::uint32_t crc = kCrcInitial;
+    std::uint32_t crc = detail::kCrcInitial;
     std::uint64_t consumed = 0;
 
     for (std::uint64_t index = 0; index < record_count; ++index) {
@@ -364,11 +304,11 @@ Result StorageManager::load(std::vector<Record>& records) const {
         if (!read_exact(in, lengths.data(), lengths.size())) {
             return truncated("a record header");
         }
-        crc = crc32_update(crc, lengths.data(), lengths.size());
+        crc = detail::crc32_update(crc, lengths.data(), lengths.size());
         consumed += lengths.size();
 
-        const std::uint32_t key_length = read_u32(lengths.data());
-        const std::uint32_t value_length = read_u32(lengths.data() + 4);
+        const std::uint32_t key_length = detail::read_u32(lengths.data());
+        const std::uint32_t value_length = detail::read_u32(lengths.data() + 4);
 
         if (key_length == 0 || key_length > limits::kMaxKeySize) {
             return Result::failure(StatusCode::CorruptData,
@@ -401,8 +341,8 @@ Result StorageManager::load(std::vector<Record>& records) const {
         if (!read_bytes_into(in, record.value, value_length)) {
             return truncated("a record value");
         }
-        crc = crc32_update(crc, record.key);
-        crc = crc32_update(crc, record.value);
+        crc = detail::crc32_update(crc, record.key);
+        crc = detail::crc32_update(crc, record.value);
         consumed += declared;
 
         if (!seen.insert_or_assign(record.key, true)) {
@@ -420,7 +360,7 @@ Result StorageManager::load(std::vector<Record>& records) const {
                                    " unexpected trailing bytes");
     }
 
-    if (crc32_finish(crc) != stored_checksum) {
+    if (detail::crc32_finish(crc) != stored_checksum) {
         return Result::failure(StatusCode::CorruptData,
                                "snapshot checksum does not match its contents");
     }

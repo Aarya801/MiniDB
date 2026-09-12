@@ -42,6 +42,13 @@ inline constexpr std::uint64_t kMaxRecordCount = 10'000'000;
 /// file is rejected up front rather than during a long read.
 inline constexpr std::uintmax_t kMaxSnapshotSize = 256ULL * 1024 * 1024;  // 256 MiB
 
+/// Maximum size of a write-ahead log file, in bytes.
+///
+/// Deliberately the same bound as a snapshot rather than a second number to
+/// keep in step: both are files MiniDB has to be willing to read in full,
+/// and both are rejected on size before being parsed.
+inline constexpr std::uintmax_t kMaxWalSize = kMaxSnapshotSize;
+
 }  // namespace limits
 
 }  // namespace minidb

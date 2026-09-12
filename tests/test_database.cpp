@@ -274,7 +274,7 @@ TEST(clear_removes_everything) {
     EXPECT_TRUE(database.set("a", "1").is_ok());
     EXPECT_TRUE(database.set("b", "2").is_ok());
 
-    database.clear();
+    EXPECT_TRUE(database.clear().is_ok());
 
     EXPECT_TRUE(database.empty());
     EXPECT_EQ(database.size(), static_cast<std::size_t>(0));
@@ -284,15 +284,15 @@ TEST(clear_removes_everything) {
 
 TEST(clear_on_an_empty_database_is_harmless) {
     Database database;
-    database.clear();
-    database.clear();
+    EXPECT_TRUE(database.clear().is_ok());
+    EXPECT_TRUE(database.clear().is_ok());
     EXPECT_TRUE(database.empty());
 }
 
 TEST(the_database_is_usable_again_after_clear) {
     Database database;
     EXPECT_TRUE(database.set("a", "1").is_ok());
-    database.clear();
+    EXPECT_TRUE(database.clear().is_ok());
 
     EXPECT_TRUE(database.set("b", "2").is_ok());
     EXPECT_EQ(database.size(), static_cast<std::size_t>(1));
@@ -442,7 +442,7 @@ TEST(a_clear_is_persisted) {
         EXPECT_TRUE(writer.set("a", "1").is_ok());
         EXPECT_TRUE(writer.set("b", "2").is_ok());
         EXPECT_TRUE(writer.save().is_ok());
-        writer.clear();
+        EXPECT_TRUE(writer.clear().is_ok());
         EXPECT_TRUE(writer.save().is_ok());
     }
 
@@ -484,10 +484,10 @@ TEST(loading_a_corrupt_snapshot_fails_and_leaves_the_database_alone) {
     // data with nothing.
     const minidb::testing::TempDirectory directory;
     const std::filesystem::path path = directory.file("db");
-    EXPECT_TRUE(minidb::testing::write_file(path, "this is not a snapshot"));
 
     Database database(path);
     EXPECT_TRUE(database.set("in-memory", "value").is_ok());
+    EXPECT_TRUE(minidb::testing::write_file(path, "this is not a snapshot"));
 
     const Result loaded = database.load();
     EXPECT_FALSE(loaded.is_ok());
@@ -509,7 +509,10 @@ TEST(loading_twice_replaces_rather_than_merges) {
     }
 
     Database database(path);
+    ASSERT_TRUE(database.load().is_ok());
     EXPECT_TRUE(database.set("unsaved", "2").is_ok());
+    ASSERT_TRUE(database.save().is_ok());
+    ASSERT_TRUE(minidb::StorageManager(path).save({{"saved", "1"}}).is_ok());
     ASSERT_TRUE(database.load().is_ok());
 
     // load() is a replacement, not a merge: the unsaved entry is gone.

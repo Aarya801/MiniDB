@@ -52,7 +52,7 @@ void print_help(std::ostream& out) {
         << "  EXIT                Save and end the session.\n"
         << "\n"
         << "Command names are case-insensitive; keys and values are not.\n"
-        << "Changes are written to disk when the session ends.\n";
+        << "Changes are logged and flushed to the OS before being applied.\n";
 }
 
 bool is_blank(std::string_view line) noexcept {
@@ -99,8 +99,9 @@ bool execute(const minidb::Command& command, minidb::Database& database, std::os
             break;
         }
         case minidb::CommandType::Clear: {
-            database.clear();
-            out << "OK\n";
+            // Clearing is logged before it is applied, so it can fail.
+            const minidb::Result result = database.clear();
+            out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
             break;
         }
         case minidb::CommandType::Help: {
@@ -185,7 +186,11 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        if (had_snapshot) {
+        if (database.replayed_operation_count() > 0) {
+            std::cout << "Recovered " << database.replayed_operation_count()
+                      << " WAL operations.\n";
+        }
+        if (had_snapshot || database.replayed_operation_count() > 0) {
             std::cout << "Loaded " << database.size() << " entr"
                       << (database.size() == 1 ? "y" : "ies") << ".\n";
         } else {

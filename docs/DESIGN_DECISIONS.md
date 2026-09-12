@@ -508,7 +508,7 @@ convenient and much easier to defend.
 Every mutation could trigger a save. That would make each `SET` O(n) in the
 size of the whole database, which is indefensible for a change to one key.
 
-So the CLI saves once, when the session ends normally. The consequence is
+At Milestone 3 the CLI saved once, when the session ended normally. The consequence was
 stated plainly in the README and in the format document: a killed process
 loses its session. This is the honest shape of snapshot-only persistence, and
 pretending otherwise would misrepresent what Milestone 4 is for.
@@ -539,8 +539,44 @@ hard-coded path.
   update is what the log is for.
 - **No `fsync`.** Atomic, not durable. Stated everywhere it could mislead.
 - **No file locking.** Two processes on one database will overwrite each other.
-- **A 1 MiB key is allowed.** The key limit matches the value limit, which is
-  generous for a key. It is one constant in `types.hpp` if that ever matters.
+- **Keys are limited to 1 KiB; values to 1 MiB.** Limits live in `types.hpp`.
 - **Duplicate detection costs memory.** The seen-set holds every key a second
   time during load. An O(1)-memory alternative would mean sorting, which costs
   time instead.
+
+## Milestone 4: write-ahead logging
+
+The existing Database/StorageManager/HashTable separation is retained.
+WriteAheadLog owns append, replay, tail repair, and reset. Binary little-endian
+and CRC helpers are shared privately through src/binary_format.*; snapshot
+version 1 is unchanged. See [WAL.md](WAL.md) for the byte layout and policies.
+
+Every SET/DELETE is logged and stream-flushed before memory changes. CLEAR is
+one additional operation because the existing public API must also recover
+correctly. Database::clear now returns Result so callers can handle disk
+errors; callers that ignore its return continue to compile. A persistent
+Database lazily recovers before its first mutation or save, preventing a
+fresh object from overwriting an existing snapshot with an empty table.
+Explicit load remains necessary before read-only access to existing data.
+
+Failed append, failed reset, failed load, or an exception applying a logged SET
+forces recovery before later writes/saves. This prevents a save from discarding
+an uncertain durable operation. There is no rollback: an operation reported
+as failed may appear after recovery if its complete log record reached the OS.
+
+Snapshots are installed before resetting the WAL. Replaying a leftover complete
+log after snapshot replacement has the same final state for absolute SET,
+DELETE, and CLEAR; no sequence checkpoint in the snapshot is needed for this
+restricted operation set. The recovered temporary table is published only on
+success. Increment operations or transactions would require a different design.
+
+Incomplete final records are trimmed only after the valid prefix is checked;
+complete corruption is rejected. Plausible damaged lengths extending past EOF
+and short junk tails remain ambiguous and are treated as incomplete writes.
+Append and snapshot save enforce the same file-size caps as their readers,
+so successful writes cannot create an oversized file recovery would reject.
+
+Durability is a checked stream flush and close to the OS. There is no device or
+directory sync, power-loss guarantee, file locking, transaction guarantee, or
+future milestone implementation. Opening per append and retaining decoded WAL
+records during replay favor readable lifecycle management over performance.

@@ -12,6 +12,7 @@
 #include "minidb/result.hpp"
 #include "minidb/storage.hpp"
 #include "minidb/types.hpp"
+#include "minidb/wal.hpp"
 
 namespace minidb {
 
@@ -23,9 +24,20 @@ namespace minidb {
 /// disk at all.
 ///
 /// Coordination is all this class does. The hash table holds the data, the
-/// StorageManager turns records into bytes, and the CLI decides when to load
-/// and save. Database owns no serialisation logic and exposes none: callers
-/// cannot reach the file format through it.
+/// StorageManager turns records into bytes, the WriteAheadLog records
+/// mutations as they happen, and the CLI decides when to load and save.
+/// Database owns no serialisation logic and exposes none: callers cannot
+/// reach either file format through it.
+///
+/// A persistent database keeps two files:
+///
+///   <path>       the snapshot: the database as of the last successful save
+///   <path>.wal   the log: every mutation applied since that save
+///
+/// Every mutation is written to the log and flushed *before* it changes
+/// memory. A failed append may still be present during recovery. load()
+/// rebuilds state as snapshot-then-log; save() writes a new snapshot and only
+/// then resets the log.
 ///
 /// The class knows nothing about terminals or command syntax. Callers hand it
 /// keys and values and receive a Result; formatting replies is the CLI's job.
@@ -52,8 +64,8 @@ public:
 
     /// A database bound to a snapshot file.
     ///
-    /// Construction performs no I/O, so it cannot fail and needs no
-    /// exceptions. Call load() to read an existing snapshot.
+    /// Construction inspects WAL metadata but reads no records.
+    /// Call load() before reads. The first mutation/save recovers automatically.
     explicit Database(std::filesystem::path snapshot_path);
 
     /// True when this database is bound to a snapshot file.
@@ -66,22 +78,39 @@ public:
     /// first run from a reopened database. False when not persistent.
     [[nodiscard]] bool snapshot_exists() const;
 
-    /// Replaces the contents of the database with the snapshot's.
+    /// The write-ahead log path. Precondition: is_persistent().
+    [[nodiscard]] const std::filesystem::path& wal_path() const;
+
+    /// Recovers the database: loads the snapshot, then replays the log on top.
     ///
-    /// A missing snapshot is not a failure: the database is simply left
-    /// empty, which is what a first run should do. Any other failure -- a
-    /// damaged file, an unsupported version, an unreadable path -- is
-    /// returned, and the database is left exactly as it was. A corrupt
-    /// snapshot never turns into an empty database.
+    /// A missing snapshot and a missing log are both fine -- together they
+    /// mean a first run, and the database is left empty. Any real failure --
+    /// a damaged file, an unsupported version, an unreadable path -- is
+    /// returned, and the database is left exactly as it was. Neither a
+    /// corrupt snapshot nor a corrupt log ever turns into an empty database.
     ///
-    /// O(n) in the number of records stored.
+    /// Replay applies records directly to the table, never through set() or
+    /// remove(), so recovering does not write new log records.
+    ///
+    /// O(n + m) for n snapshot records and m logged operations.
     Result load();
 
-    /// Writes the entire database to the snapshot, replacing it.
+    /// Number of logged operations replayed by the last load(). Lets the CLI
+    /// tell the user that work was recovered.
+    [[nodiscard]] std::size_t replayed_operation_count() const noexcept {
+        return replayed_operation_count_;
+    }
+
+    /// Writes the entire database to the snapshot, then resets the log.
+    ///
+    /// The order matters and is not negotiable: the log is only cleared once
+    /// the snapshot that supersedes it is safely in place. If the snapshot
+    /// fails, the log is left untouched and every logged operation is still
+    /// recoverable.
     ///
     /// O(n) in the number of entries, in both time and the memory used to
     /// collect them. Snapshots are whole-file: there is no partial save.
-    Result save() const;
+    Result save();
 
     /// Stores `value` under `key`, replacing any existing entry.
     /// Fails with InvalidArgument for an empty key, KeyTooLarge or
@@ -105,12 +134,18 @@ public:
     [[nodiscard]] std::vector<Key> keys() const;
 
     /// Removes every entry.
-    void clear() noexcept;
+    ///
+    /// Returns a Result because on a persistent database this is logged
+    /// first, and logging can fail. A clear that was not logged would be
+    /// undone by recovery: replaying the earlier SETs would bring every key
+    /// back.
+    Result clear();
 
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept;
 
 private:
+    Result ensure_loaded();
     /// Hashes a std::string_view, so HashTable can look up a key without
     /// first constructing a std::string. Without it every get, exists and
     /// remove would allocate a temporary string purely to throw it away --
@@ -127,15 +162,26 @@ private:
 
     using EntryTable = HashTable<Key, Value, StringHash>;
 
+    /// Applies one recovered log record straight to a table.
+    ///
+    /// Deliberately not routed through set()/remove()/clear(): those append to
+    /// the log, and replay must not write the records it is reading.
+    static void apply_recovered(EntryTable& table, const WalRecord& record);
+
     /// HashTable compares with ==, and std::string == std::string_view
     /// already works, so the hasher above is all that is needed to keep
     /// lookups allocation-free.
     EntryTable entries_;
 
-    /// Absent for an in-memory database. An optional rather than a
-    /// StorageManager with an empty path, so "not persistent" is a state the
-    /// type can express instead of one every method has to check for.
+    /// Both absent for an in-memory database, both present for a persistent
+    /// one. Optionals rather than objects with empty paths, so "not
+    /// persistent" is a state the types can express instead of one every
+    /// method has to check for.
     std::optional<StorageManager> storage_;
+    std::optional<WriteAheadLog> wal_;
+
+    std::size_t replayed_operation_count_ = 0;
+    bool loaded_ = false;
 };
 
 }  // namespace minidb

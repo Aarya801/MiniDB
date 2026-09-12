@@ -1,10 +1,10 @@
 # Snapshot Format
 
-The on-disk format MiniDB uses for persistence, as of Milestone 3.
+The snapshot format introduced in Milestone 3 and retained in Milestone 4.
 
 A snapshot is the entire database in one file. Saving rewrites the whole file;
-loading reads the whole file. There is no incremental update and no log — the
-write-ahead log arrives in Milestone 4.
+loading reads the whole file. Milestone 4 adds a separate [WAL](WAL.md);
+the snapshot format is unchanged.
 
 - **Format version:** 1
 - **Default location:** `%LOCALAPPDATA%\MiniDB\minidb.snapshot` on Windows,
@@ -112,7 +112,7 @@ and read.
 
 | Limit | Value | Purpose |
 | --- | --- | --- |
-| `kMaxKeySize` | 1 MiB (1048576) | Largest key |
+| `kMaxKeySize` | 1 KiB (1024) | Largest key |
 | `kMaxValueSize` | 1 MiB (1048576) | Largest value |
 | `kMaxRecordCount` | 10,000,000 | Largest `record_count` a reader will believe |
 | `kMaxSnapshotSize` | 256 MiB | Largest file a reader will open |
@@ -224,9 +224,9 @@ Stating this precisely matters more than making it sound strong.
 - A reader never sees a partially written snapshot. The rename makes the new
   file visible in one step, so a concurrent reader observes either the complete
   previous snapshot or the complete new one.
-- If MiniDB crashes, is killed, or fails mid-write, the existing snapshot is
-  left exactly as it was. The incomplete data is in the scratch file, which is
-  discarded.
+- Before replacement, a failed write leaves the previous snapshot intact.
+  After replacement, the new complete snapshot is installed. WAL reset follows
+  replacement; see [WAL.md](WAL.md) for recovery at that boundary.
 - A snapshot that is damaged in any way described above is detected and
   refused, not silently misread.
 
@@ -239,16 +239,11 @@ Stating this precisely matters more than making it sound strong.
   come back with either version of the file, or in principle with a
   zero-length one. Genuine durability needs an explicit flush to the device,
   which MiniDB does not perform.
-- **Anything between saves.** The CLI saves when the session ends normally. Kill
-  the process mid-session and every change made since startup is gone — nothing
-  on disk records them. This is the central limitation of snapshot-only
-  persistence and precisely what the write-ahead log in Milestone 4 exists to
-  fix.
+- **Snapshot alone.** Changes between saves are recovered from the companion WAL; see [WAL.md](WAL.md).
 - **Multi-process safety.** There is no locking. Two MiniDB processes on one
   database file will overwrite each other's snapshots.
 
-In short: MiniDB currently provides **atomic snapshot replacement**, not crash
-durability. WAL and crash-recovery guarantees do not exist until Milestone 4.
+Milestone 4 adds process-termination recovery through the WAL, but no device flush or power-loss guarantee.
 
 ## Complexity
 
