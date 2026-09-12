@@ -274,3 +274,224 @@ still usable.
 defaulting to `std::hash<Key>`. That is what makes the collision tests possible
 without weakening the real code: the tests pass in a hasher that returns `0`
 for every key, and exercise the same chaining logic the database uses.
+
+---
+
+## Milestone 3 — Persistence
+
+### Why a database needs to write to disk
+
+Everything up to now lived in RAM, which the operating system reclaims the
+moment the process ends. A database that forgets everything when you close it
+is a cache, not a database. Persistence means the data outlives the program.
+
+The hard part is not writing bytes to a file. It is that a program can stop at
+*any* moment — killed, crashed, out of disk, power cut — and whatever is on
+disk at that instant has to still make sense.
+
+### Serialisation
+
+Serialisation is turning in-memory objects into a sequence of bytes;
+deserialisation is the reverse. In memory a key is a `std::string`: a pointer,
+a length, and a capacity. None of that can go into a file, because the pointer
+is an address that means nothing in another process.
+
+So a record is written as *content*, not as layout:
+
+```text
+key_length  value_length  key bytes  value bytes
+```
+
+Reading it back means reading the lengths, then reading exactly that many
+bytes. The lengths come first for a reason: without them the reader would not
+know where one field ends and the next begins.
+
+### Why lengths instead of separators
+
+A text format might write `name=Aarya` and split on `=`. That breaks the moment
+a value contains `=`, and fixing it needs an escaping scheme, which then needs
+its own rule for escaping the escape character.
+
+An explicit length sidesteps all of it. Any byte can appear in a key or value —
+spaces, `=`, newlines, even a zero byte — because the reader never searches for
+a delimiter. It is told how far to read.
+
+### Binary versus text
+
+MiniDB uses a binary format: numbers are stored as raw bytes rather than as
+digits. `1048576` takes 4 bytes as a `uint32` and 7 as text, and parsing text
+back into a number means validating the digits. Binary is smaller and there is
+nothing to parse.
+
+The cost is that the file cannot be read in a text editor. That is why
+`docs/STORAGE_FORMAT.md` exists, and why it includes a hex dump of a real
+snapshot.
+
+### Endianness
+
+Computers disagree about the order of bytes inside a number. The value
+`0x12345678` is stored as `78 56 34 12` on a little-endian machine (x86 and
+most ARM) and as `12 34 56 78` on a big-endian one.
+
+That matters for file formats. Write the raw bytes of an integer on one machine
+and read them on the other, and the number changes.
+
+MiniDB picks **little-endian** and encodes byte by byte:
+
+```cpp
+for (int shift = 0; shift < 32; shift += 8) {
+    out.push_back(static_cast<char>((value >> shift) & 0xFF));
+}
+```
+
+The shifts produce the same bytes on any CPU, so a snapshot is portable. This
+is also why the code never copies the bytes of an integer directly — that
+shortcut would make the format depend on the hardware.
+
+### Untrusted input
+
+A database file is **untrusted input**, even when your own program wrote it. It
+may have been truncated by a full disk, edited by someone curious, damaged by
+failing hardware, or replaced entirely.
+
+The dangerous pattern looks completely reasonable:
+
+```cpp
+uint32_t length = read_length_from_file();
+std::string value;
+value.resize(length);          // length came from the file
+read_bytes(value.data(), length);
+```
+
+If the file is corrupt and claims a length of 4,000,000,000, that `resize`
+tries to allocate 4 GB. Best case the program dies; worse cases involve reading
+past the end of a buffer.
+
+MiniDB validates every length *before* using it: against a configured maximum,
+and against the number of bytes actually left in the file. Nothing taken from
+the file reaches an allocator unchecked.
+
+### Integer overflow
+
+Fixed-width integers wrap silently when they exceed their range. If a corrupt
+file claims 2^64-1 records and the code checks:
+
+```cpp
+if (record_count * 9 > payload_bytes) { reject(); }
+```
+
+the multiplication wraps to something small, the check passes, and the loop
+runs essentially forever. Rearranging the same comparison fixes it:
+
+```cpp
+if (record_count > payload_bytes / 9) { reject(); }
+```
+
+Division cannot overflow. The rule worth remembering: when validating a value
+you do not trust, arrange the arithmetic so it cannot wrap — usually by
+dividing the trusted side rather than multiplying the untrusted one.
+
+### Checksums
+
+A checksum is a small number computed from a block of data and stored alongside
+it. Recompute it on read; if it differs, the data changed.
+
+MiniDB uses **CRC-32**, which reduces any number of bytes to 4. It catches the
+failure no other check can see: a single flipped bit inside a key or a value.
+Such a file has a valid magic number, a valid version, a valid record count and
+valid lengths — it parses perfectly and hands back the wrong answer. Only the
+checksum notices.
+
+A CRC detects *accidental* damage. It is not security: anyone deliberately
+editing the file can recompute the checksum too.
+
+### Atomic file replacement
+
+Writing directly over a database file is dangerous. Halfway through, the file
+is half old data and half new, and a crash at that moment leaves it that way
+permanently.
+
+The standard fix is to never modify the real file:
+
+```text
+1. write everything to database.tmp
+2. close it
+3. rename database.tmp -> database
+```
+
+Renaming is a *single* filesystem operation. At every instant the database path
+points either at the complete old file or at the complete new one, never at
+something in between. A crash during step 1 leaves the real database untouched
+and a stray `.tmp` file, which gets cleaned up.
+
+One subtlety: this only works within a single filesystem. Renaming across
+volumes is a copy, which is not atomic — which is why MiniDB puts the temporary
+file next to the database rather than in the system temp directory.
+
+### Atomic is not the same as durable
+
+These sound alike and are not:
+
+- **Atomic** — an operation either happens completely or not at all. Nobody
+  observes a half-done state.
+- **Durable** — once the operation reports success, the data survives a power
+  cut.
+
+MiniDB's rename is atomic. It is **not** durable, because writing a file only
+hands the bytes to the operating system, which may hold them in memory for a
+while before the disk sees them. Forcing them out requires `fsync` (or
+`FlushFileBuffers` on Windows), which MiniDB does not call.
+
+So MiniDB guarantees you never see a corrupt half-written snapshot. It does not
+guarantee that a save survives pulling the plug one second later. Knowing which
+of the two you have is the difference between an honest claim and marketing.
+
+### Snapshots versus write-ahead logs
+
+Two strategies for getting data onto disk:
+
+| | Snapshot | Write-ahead log |
+| --- | --- | --- |
+| What is written | The whole database | Each change, as it happens |
+| Cost per change | O(n) — rewrites everything | O(1) — appends one record |
+| Cost to load | O(n) — one pass | O(changes) — replay the log |
+| Lost in a crash | Everything since the last save | Nothing that was flushed |
+
+MiniDB currently does snapshots only, saving when the session ends. A clean
+exit persists everything; a killed process loses the session. That is the gap
+Milestone 4 fills: the log records each change immediately, so a crash costs at
+most the last unflushed write.
+
+Real databases use both. The log captures changes cheaply as they arrive, and
+periodic snapshots keep the log from growing forever.
+
+### Why a corrupt file must not become an empty database
+
+The tempting shortcut on a failed load is to shrug and start empty. It is
+actively destructive. The session would end with a save, that save would
+overwrite the damaged file with an empty snapshot, and the original bytes —
+which a person might have recovered something from — would be gone.
+
+MiniDB refuses to start instead, reports what is wrong, and leaves the file
+alone. Failing loudly beats destroying data quietly.
+
+### RAII for files
+
+The scratch file has to disappear on every failure path: a write error, a
+rename failure, an exception from anywhere in between. Writing
+`remove(temp_path)` before each of a dozen `return` statements works right up
+until someone adds the thirteenth.
+
+Instead the cleanup lives in a destructor:
+
+```cpp
+class ScratchFile {
+    ~ScratchFile() { if (remove_on_destruction_) fs::remove(path_); }
+    void keep() noexcept { remove_on_destruction_ = false; }
+};
+```
+
+Every exit from the function runs the destructor, including one caused by an
+exception. The success path calls `keep()`. This is the same idea as
+`unique_ptr` freeing memory, applied to a file: the resource is released by
+leaving the scope, not by remembering to say so.

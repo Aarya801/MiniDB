@@ -1,11 +1,13 @@
 // MiniDB command-line front end.
 //
-// The CLI is deliberately thin: it owns terminal I/O and the shape of the
-// replies, and nothing else. Parsing lives in the parser and all state lives
-// in Database, so the tests exercise the same code paths the user drives.
+// The CLI is deliberately thin: it owns terminal I/O, the shape of the
+// replies, and the decision of when to load and save. Parsing lives in the
+// parser, state lives in Database, and bytes on disk are StorageManager's
+// business, so the tests exercise the same code paths the user drives.
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <ostream>
 #include <string>
@@ -16,6 +18,7 @@
 #include "minidb/command_parser.hpp"
 #include "minidb/database.hpp"
 #include "minidb/result.hpp"
+#include "minidb/storage.hpp"
 #include "minidb/types.hpp"
 
 namespace {
@@ -24,13 +27,17 @@ constexpr std::string_view kProgramName = "minidb";
 constexpr std::string_view kPrompt = "MiniDB> ";
 
 void print_usage(std::ostream& out) {
-    out << "Usage: " << kProgramName << "\n"
+    out << "Usage: " << kProgramName << " [database-file]\n"
         << "\n"
-        << "Starts an interactive MiniDB session. All data is held in memory\n"
-        << "and is lost when the session ends.\n"
+        << "Starts an interactive MiniDB session.\n"
         << "\n"
-        << "  -h, --help     Show this message\n"
-        << "      --version  Show the version\n";
+        << "The database is read at startup and written back when the session\n"
+        << "ends normally, through EXIT or end of input.\n"
+        << "\n"
+        << "  [database-file]  Snapshot to use. Defaults to a file in your\n"
+        << "                   user data directory.\n"
+        << "  -h, --help       Show this message\n"
+        << "      --version    Show the version\n";
 }
 
 void print_help(std::ostream& out) {
@@ -42,9 +49,10 @@ void print_help(std::ostream& out) {
         << "  KEYS                List every key.\n"
         << "  CLEAR               Remove every key.\n"
         << "  HELP                Show this message.\n"
-        << "  EXIT                End the session.\n"
+        << "  EXIT                Save and end the session.\n"
         << "\n"
-        << "Command names are case-insensitive; keys and values are not.\n";
+        << "Command names are case-insensitive; keys and values are not.\n"
+        << "Changes are written to disk when the session ends.\n";
 }
 
 bool is_blank(std::string_view line) noexcept {
@@ -138,7 +146,14 @@ void run_session(minidb::Database& database) {
 int main(int argc, char** argv) {
     // Any escaped exception would otherwise terminate without a diagnostic.
     try {
-        if (argc > 1) {
+        std::filesystem::path database_file = minidb::default_snapshot_path();
+
+        if (argc > 2) {
+            std::cerr << kProgramName << ": too many arguments\n";
+            print_usage(std::cerr);
+            return 2;
+        }
+        if (argc == 2) {
             const std::string argument = argv[1];
             if (argument == "-h" || argument == "--help") {
                 print_usage(std::cout);
@@ -148,17 +163,43 @@ int main(int argc, char** argv) {
                 std::cout << kProgramName << " " << MINIDB_VERSION << "\n";
                 return 0;
             }
-            std::cerr << kProgramName << ": unexpected argument '" << argument << "'\n";
-            print_usage(std::cerr);
-            return 2;
+            database_file = argument;
         }
 
-        std::cout << "MiniDB v" << MINIDB_VERSION << "\n"
-                  << "In-memory only: nothing is written to disk yet.\n"
-                  << "Type HELP for the command list.\n\n";
+        minidb::Database database(database_file);
 
-        minidb::Database database;
+        std::cout << "MiniDB v" << MINIDB_VERSION << "\n"
+                  << "Database: " << database.snapshot_path().string() << "\n";
+
+        const bool had_snapshot = database.snapshot_exists();
+        const minidb::Result loaded = database.load();
+        if (!loaded.is_ok()) {
+            // A damaged database is never treated as an empty one. Stopping
+            // here leaves the file untouched so it can be inspected or moved
+            // aside, instead of being overwritten by an empty snapshot when
+            // this session ends.
+            std::cerr << kProgramName << ": cannot open database: " << loaded.to_display_string()
+                      << "\n"
+                      << kProgramName
+                      << ": the file has been left unchanged; move it aside to start fresh\n";
+            return 1;
+        }
+
+        if (had_snapshot) {
+            std::cout << "Loaded " << database.size() << " entr"
+                      << (database.size() == 1 ? "y" : "ies") << ".\n";
+        } else {
+            std::cout << "New database: nothing saved here yet.\n";
+        }
+        std::cout << "Type HELP for the command list.\n\n";
+
         run_session(database);
+
+        const minidb::Result saved = database.save();
+        if (!saved.is_ok()) {
+            std::cerr << kProgramName << ": failed to save: " << saved.to_display_string() << "\n";
+            return 1;
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << kProgramName << ": fatal error: " << error.what() << "\n";

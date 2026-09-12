@@ -8,8 +8,10 @@ recovery, an LRU cache, transactions and thread-safe access — at a size that c
 be read and understood in an afternoon. It is not a production database, and the
 [Limitations](#limitations) section says plainly what it does not do.
 
-> **Current state:** MiniDB runs entirely in memory. Nothing is written to disk
-> yet — data is lost when the session ends. Persistence arrives in Milestone 3.
+> **Current state:** MiniDB stores data on disk and reloads it on startup.
+> Persistence is snapshot-based: the whole database is written when a session
+> ends normally. Kill the process mid-session and changes made since startup
+> are lost — the write-ahead log in Milestone 4 is what closes that gap.
 
 ## Status
 
@@ -18,7 +20,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 0** — build system, warning policy, test harness, CI
 - [x] **Milestone 1** — in-memory database, command parser, interactive CLI
 - [x] **Milestone 2** — custom hash table with separate chaining
-- [ ] Milestone 3 — persistence
+- [x] **Milestone 3** — persistent binary snapshots with atomic replacement
 - [ ] Milestone 4 — write-ahead log
 - [ ] Milestone 5 — crash recovery
 - [ ] Milestone 6 — LRU cache
@@ -37,9 +39,10 @@ Built in milestones, each one a working program.
 | `KEYS` | Lists every key, sorted. Prints `(empty)` when there are none. |
 | `CLEAR` | Removes every key. |
 | `HELP` | Lists the commands. |
-| `EXIT` | Ends the session. End-of-input works too. |
+| `EXIT` | Saves and ends the session. End-of-input works too. |
 
-Command names are case-insensitive; keys and values are not.
+Command names are case-insensitive; keys and values are not. The database is
+read at startup and written back when the session ends.
 
 ## Requirements
 
@@ -62,6 +65,15 @@ Then start a session:
 ./build/minidb
 ```
 
+MiniDB keeps its database in your user data directory
+(`%LOCALAPPDATA%\MiniDB\minidb.snapshot` on Windows,
+`$XDG_DATA_HOME/minidb/minidb.snapshot` elsewhere). Pass a path to use a
+different file:
+
+```bash
+./build/minidb ./scratch.snapshot
+```
+
 ### Build options
 
 | Option | Default | Effect |
@@ -81,7 +93,8 @@ cmake --build build
 ```text
 $ ./build/minidb
 MiniDB v0.1.0
-In-memory only: nothing is written to disk yet.
+Database: /home/aarya/.local/share/minidb/minidb.snapshot
+New database: nothing saved here yet.
 Type HELP for the command list.
 
 MiniDB> SET name Aarya
@@ -122,6 +135,48 @@ MiniDB> EXIT
 Goodbye!
 ```
 
+## Persistence
+
+Data survives restarts. The whole database is written to a binary snapshot
+when the session ends, and read back when it starts:
+
+```text
+$ ./build/minidb ./demo.snapshot
+MiniDB> SET name Aarya
+OK
+MiniDB> SET language C++
+OK
+MiniDB> EXIT
+Goodbye!
+
+$ ./build/minidb ./demo.snapshot
+MiniDB v0.1.0
+Database: ./demo.snapshot
+Loaded 2 entries.
+Type HELP for the command list.
+
+MiniDB> GET name
+Aarya
+MiniDB> GET language
+C++
+```
+
+**How it works.** Saving writes every record to a temporary file beside the
+database, then renames it over the original in one filesystem operation, so a
+reader never sees a half-written file. The format is documented byte by byte
+in [docs/STORAGE_FORMAT.md](docs/STORAGE_FORMAT.md).
+
+**What is guaranteed.** A reader never observes a partial snapshot. If MiniDB
+fails or is killed while saving, the previous snapshot is left untouched. A
+damaged snapshot is detected — by magic number, version, size limits, length
+checks and a CRC-32 — and refused, never silently read as an empty database.
+
+**What is not.** MiniDB does not call `fsync`, so a successful save is not
+proof against power loss. More importantly, changes are only written when the
+session ends: kill the process mid-session and everything since startup is
+gone. That is the defining limit of snapshot-only persistence, and Milestone 4
+addresses it.
+
 ## Architecture
 
 ```mermaid
@@ -133,8 +188,8 @@ flowchart TD
     Parser -.-> Result[Result / StatusCode]
     Database -.-> Result
 
-    Storage[Storage manager]:::planned
-    Database -.-> Storage
+    Database --> Storage[StorageManager]
+    Storage --> Snapshot[(Binary snapshot)]
 
     classDef planned stroke-dasharray: 4 4
 ```
@@ -150,6 +205,8 @@ Three pieces, each with one job:
 - **`Database`** — stores the data. Knows nothing about terminals or syntax.
 - **`HashTable`** — MiniDB's own hash table, described below. Knows nothing
   about keys being strings or values being database entries.
+- **`StorageManager`** — turns records into bytes and back, and owns every
+  rule about what a valid snapshot is. Knows nothing about hash tables.
 
 Both the parser and the database report problems through the same `Result` /
 `StatusCode` pair from Milestone 0, so the CLI has one error model to render.
@@ -199,8 +256,11 @@ As provided by `HashTable`:
 | `KEYS` | O(n) |
 | `CLEAR` | O(n) |
 | `size` | O(1) |
+| Loading a snapshot | O(n) time, O(n) memory |
+| Saving a snapshot | O(n) time |
 
-Plus, on the table itself: `rehash` is O(n), and space is O(n + bucket_count).
+Persistence is not O(1) in any form: saving and loading each touch every
+record. Plus, on the table itself: `rehash` is O(n), and space is O(n + bucket_count).
 
 These averages are **expected** values, not guarantees. They hold on two
 conditions: the hash spreads keys evenly, and the load factor stays bounded.
@@ -229,6 +289,7 @@ ctest --test-dir build -R test_database -V
 
 | Suite | Covers |
 | --- | --- |
+| `test_storage` | Round trips, corrupt magic, bad version, truncation at every offset, invalid lengths, overflow attempts, duplicate keys, checksum failures, scratch-file cleanup |
 | `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
 | `test_database` | Every operation, empty state, overwrites, size limits, binary values, 1000-key stress |
 | `test_command_parser` | Every command, spaces in values, case handling, missing and extra arguments, unknown commands |
@@ -240,9 +301,15 @@ third-party library. The reasoning is in
 
 ## Limitations
 
-As of Milestone 1, MiniDB does **not**:
+As of Milestone 3, MiniDB does **not**:
 
-- Persist anything. Data lives in memory and is lost on exit.
+- Survive a crash mid-session. Only a clean exit writes to disk, so a killed
+  process loses everything since startup. Milestone 4 adds the write-ahead log.
+- Guarantee durability against power loss. Saves are not `fsync`ed.
+- Update the snapshot incrementally. Every save rewrites the whole file, so
+  saving is O(n) however small the change.
+- Coordinate between processes. There is no locking, and two MiniDB processes
+  on one database will overwrite each other.
 - Support transactions, caching, or concurrent access.
 - Allow spaces in keys, since arguments are whitespace-separated.
 - Allow an empty value from the CLI, though `Database::set` accepts one.
@@ -258,6 +325,7 @@ And it is not intended to ever implement:
 
 ## Documentation
 
+- [Storage format](docs/STORAGE_FORMAT.md) — the snapshot layout, byte by byte
 - [Design decisions](docs/DESIGN_DECISIONS.md) — why things are built the way they are
 - [Learning notes](docs/LEARNING_NOTES.md) — the concepts behind the code, explained from scratch
 

@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "minidb/result.hpp"
 #include "minidb/types.hpp"
+#include "temp_directory.hpp"
 #include "test_framework.hpp"
 
 using minidb::Database;
@@ -334,6 +336,184 @@ TEST(many_keys_are_all_retrievable) {
     EXPECT_EQ(database.size(), static_cast<std::size_t>(kCount / 2));
     EXPECT_FALSE(database.exists("key0"));
     EXPECT_TRUE(database.exists("key1"));
+}
+
+// -------------------------------------------------------------------------
+// Persistence
+// -------------------------------------------------------------------------
+
+TEST(a_default_database_is_not_persistent) {
+    Database database;
+    EXPECT_FALSE(database.is_persistent());
+    EXPECT_FALSE(database.snapshot_exists());
+
+    // Neither direction of persistence is available, and both say so rather
+    // than pretending to have worked.
+    EXPECT_EQ(database.save().code(), StatusCode::InvalidArgument);
+    EXPECT_EQ(database.load().code(), StatusCode::InvalidArgument);
+}
+
+TEST(a_persistent_database_reports_its_path) {
+    const minidb::testing::TempDirectory directory;
+    const Database database(directory.file("db"));
+
+    EXPECT_TRUE(database.is_persistent());
+    EXPECT_EQ(database.snapshot_path(), directory.file("db"));
+    EXPECT_FALSE(database.snapshot_exists());
+}
+
+TEST(entries_survive_being_saved_and_loaded_into_a_new_database) {
+    // The actual promise of Milestone 3, at the Database level: what one
+    // instance saves, a separate instance reads back.
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+
+    {
+        Database writer(path);
+        EXPECT_TRUE(writer.set("name", "Aarya").is_ok());
+        EXPECT_TRUE(writer.set("language", "C++").is_ok());
+        EXPECT_TRUE(writer.set("note", "hello world with spaces").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database reader(path);
+    EXPECT_TRUE(reader.snapshot_exists());
+    ASSERT_TRUE(reader.load().is_ok());
+
+    EXPECT_EQ(reader.size(), static_cast<std::size_t>(3));
+    EXPECT_EQ(reader.get("name").value(), std::string("Aarya"));
+    EXPECT_EQ(reader.get("language").value(), std::string("C++"));
+    EXPECT_EQ(reader.get("note").value(), std::string("hello world with spaces"));
+    EXPECT_EQ(sorted_keys(reader), std::string("language,name,note"));
+}
+
+TEST(loading_a_database_that_was_never_saved_starts_empty) {
+    const minidb::testing::TempDirectory directory;
+    Database database(directory.file("never-saved"));
+
+    // A first run is not a failure.
+    EXPECT_TRUE(database.load().is_ok());
+    EXPECT_TRUE(database.empty());
+}
+
+TEST(an_update_is_persisted_rather_than_duplicated) {
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+
+    {
+        Database writer(path);
+        EXPECT_TRUE(writer.set("name", "first").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+        EXPECT_TRUE(writer.set("name", "second").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database reader(path);
+    ASSERT_TRUE(reader.load().is_ok());
+    EXPECT_EQ(reader.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(reader.get("name").value(), std::string("second"));
+}
+
+TEST(a_deletion_is_persisted) {
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+
+    {
+        Database writer(path);
+        EXPECT_TRUE(writer.set("keep", "1").is_ok());
+        EXPECT_TRUE(writer.set("drop", "2").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+        EXPECT_TRUE(writer.remove("drop").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database reader(path);
+    ASSERT_TRUE(reader.load().is_ok());
+    EXPECT_EQ(sorted_keys(reader), std::string("keep"));
+    EXPECT_EQ(reader.get("drop").code(), StatusCode::NotFound);
+}
+
+TEST(a_clear_is_persisted) {
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+
+    {
+        Database writer(path);
+        EXPECT_TRUE(writer.set("a", "1").is_ok());
+        EXPECT_TRUE(writer.set("b", "2").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+        writer.clear();
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database reader(path);
+    ASSERT_TRUE(reader.load().is_ok());
+    EXPECT_TRUE(reader.empty());
+}
+
+TEST(many_entries_survive_a_save_and_load) {
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+    constexpr int kCount = 2000;
+
+    {
+        Database writer(path);
+        for (int index = 0; index < kCount; ++index) {
+            EXPECT_TRUE(writer.set("key" + std::to_string(index), std::to_string(index)).is_ok());
+        }
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database reader(path);
+    ASSERT_TRUE(reader.load().is_ok());
+    EXPECT_EQ(reader.size(), static_cast<std::size_t>(kCount));
+
+    int mismatches = 0;
+    for (int index = 0; index < kCount; ++index) {
+        const Result value = reader.get("key" + std::to_string(index));
+        if (!value.is_ok() || value.value() != std::to_string(index)) {
+            ++mismatches;
+        }
+    }
+    EXPECT_EQ(mismatches, 0);
+}
+
+TEST(loading_a_corrupt_snapshot_fails_and_leaves_the_database_alone) {
+    // The rule that matters most: a damaged file must not quietly become an
+    // empty database, because the next save would then overwrite the real
+    // data with nothing.
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+    EXPECT_TRUE(minidb::testing::write_file(path, "this is not a snapshot"));
+
+    Database database(path);
+    EXPECT_TRUE(database.set("in-memory", "value").is_ok());
+
+    const Result loaded = database.load();
+    EXPECT_FALSE(loaded.is_ok());
+    EXPECT_EQ(loaded.code(), StatusCode::CorruptData);
+
+    // Untouched: the entry that was already there is still there.
+    EXPECT_EQ(database.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(database.get("in-memory").value(), std::string("value"));
+}
+
+TEST(loading_twice_replaces_rather_than_merges) {
+    const minidb::testing::TempDirectory directory;
+    const std::filesystem::path path = directory.file("db");
+
+    {
+        Database writer(path);
+        EXPECT_TRUE(writer.set("saved", "1").is_ok());
+        EXPECT_TRUE(writer.save().is_ok());
+    }
+
+    Database database(path);
+    EXPECT_TRUE(database.set("unsaved", "2").is_ok());
+    ASSERT_TRUE(database.load().is_ok());
+
+    // load() is a replacement, not a merge: the unsaved entry is gone.
+    EXPECT_EQ(sorted_keys(database), std::string("saved"));
 }
 
 MINIDB_TEST_MAIN()

@@ -15,8 +15,12 @@ features MiniDB actually uses are modest, and each earns its place:
 - **Concepts / `requires` expressions** — the test framework asks at compile
   time whether a type can be streamed to `std::ostream`, and falls back to a
   placeholder if not. In C++17 this needs a hand-written SFINAE trait.
-- **Designated initialisers and `std::span`** — expected to be useful once the
-  binary storage format lands in Milestone 3.
+- **`[[no_unique_address]]`** — lets the hash table hold a stateless hasher
+  without the empty object costing a byte of every table.
+
+An earlier draft of this section also claimed designated initialisers and
+`std::span` would be useful once the storage format existed. Milestone 3 landed
+without needing either, so the claim is removed rather than left standing.
 
 `CXX_EXTENSIONS` is set to `OFF`. That compiles with `-std=c++20` rather than
 `-std=gnu++20`, so a GNU-only extension fails on the machine where it is written
@@ -104,10 +108,11 @@ referenced it, and `kMaxRecordSize` was defined as key + value + 64, where the
 magic number justified by nothing.
 
 Each limit is introduced in the milestone that checks it. Milestone 1 added
-`kMaxKeySize` and `kMaxValueSize` alongside the `SET` path that enforces them;
-the record and log bounds arrive with the binary format in Milestone 3. The
-`CorruptData` status code already exists, so the error vocabulary is in place
-and those checks will slot in without redesign.
+`kMaxKeySize` and `kMaxValueSize` alongside the `SET` path that enforces them.
+Milestone 3 added `kMaxRecordCount` and `kMaxSnapshotSize` with the snapshot
+reader that validates against them. The write-ahead log adds its own record
+bound in Milestone 4. In every case the `CorruptData` status code was already
+in place, so the checks slotted in without redesigning the error model.
 
 ### One test executable per test file
 
@@ -373,3 +378,169 @@ disturbing anything already written.
 - **`std::hash` is not collision-resistant.** It is not meant to be. MiniDB is
   a local, single-process database with no untrusted input, so hash-flooding is
   out of scope; a network-facing store would need a seeded or keyed hash.
+
+---
+
+## Milestone 3 — Persistent storage
+
+### Snapshots before a log
+
+There are two ways to make a database durable: write the whole thing out
+periodically (a snapshot), or append every change to a log as it happens (a
+write-ahead log). MiniDB does snapshots first because they are the simpler
+half, and because they make the log's purpose obvious.
+
+A snapshot is a complete, self-describing file. Loading it is one pass with no
+replay and no reconciliation, and the code is short enough to read in one
+sitting. Its weakness is equally clear: nothing on disk records a change until
+the next save, so everything since the last one is lost if the process dies.
+Milestone 4 adds the log precisely to close that window, and arriving at it
+after feeling the gap is better than being handed both at once.
+
+### Where the record type lives
+
+`StorageManager` deals in `Record` — a plain key and value — not in
+`HashTable` or `Database`. That keeps the dependency one-directional:
+serialisation knows nothing about how entries are held in memory, and the hash
+table knows nothing about bytes on disk. `Database` is the only place that
+knows both, which is what makes it a coordinator rather than a wrapper.
+
+The cost is one copy of every key and value into a vector on save — O(n)
+memory on top of the database itself. That is documented rather than optimised
+away: a callback-based writer would avoid the vector at the price of a more
+tangled interface, and n here is bounded by a 256 MiB file.
+
+### Little-endian by hand, not by memcpy
+
+Integers are encoded one byte at a time rather than by copying the bytes of an
+in-memory value. Writing `out.write(reinterpret_cast<const char*>(&count), 8)`
+would be shorter, and would produce a file whose meaning depends on the CPU
+that wrote it — a snapshot written on a big-endian machine would silently
+misread on a little-endian one.
+
+Doing the shifts explicitly costs a few lines, makes the format independent of
+the architecture, and means there is no `reinterpret_cast` anywhere in the
+reader or the writer. It also makes the documented layout literally true: what
+`docs/STORAGE_FORMAT.md` says sits at offset 12 is what the code puts there.
+
+### Why there is a checksum
+
+The original plan had none. The magic number catches a file that is not a
+snapshot, the version catches an incompatible one, and the length checks catch
+a structurally broken one — which covers everything except the case that
+actually matters for a database: a single flipped bit inside a key or a value.
+That file passes every structural check and loads as plausible, wrong data.
+
+Since "never silently accept corrupted data" is the entire point of validating
+the file, a CRC-32 over the payload earns its thirty lines. It is computed
+without a lookup table because the arithmetic is nothing next to the I/O, and
+the writer patches it into the header by seeking back after the payload is
+written — the alternatives being to encode every record twice or to hold the
+whole encoded file in memory.
+
+A CRC is an integrity check, not a security measure. It detects accidental
+damage; it does not detect deliberate tampering, because anyone who edits the
+file can recompute it.
+
+### Validation order, and why lengths are checked before use
+
+Checks run cheapest-first, and every length is validated before it reaches an
+allocator. The two that matter most:
+
+- **The record count** is compared as `count > payload_bytes / 9`, not
+  `count * 9 > payload_bytes`. Dividing cannot overflow; multiplying a corrupt
+  count of 2^64-1 would wrap to a small number and sail through.
+- **Record lengths** are 32-bit and their sum is computed as 64-bit, so it
+  cannot wrap, and it is compared against the bytes actually remaining in the
+  file before either string is resized.
+
+Getting this backwards is how a corrupt file becomes a crash or a
+multi-gigabyte allocation. The tests include a record declaring two
+`0xFFFFFFFF` lengths for exactly that reason.
+
+### Duplicate keys are corruption, not a merge
+
+A snapshot containing the same key twice cannot have come from `save()`,
+because the database holds each key once. Such a file has been altered or
+damaged. Resolving it by keeping the last record would be silent data loss, so
+it is refused instead. Detection uses MiniDB's own `HashTable` as a seen-set,
+which keeps loading O(n) on average rather than the O(n log n) a sort costs.
+
+### Records are published only on success
+
+`load()` parses into a local vector and moves it into the caller's only once
+every check has passed. The first version pushed straight into the caller's
+vector, and the tests caught it immediately: a file rejected halfway through
+left the caller holding a partial snapshot. The status code was correct, but a
+caller who checked it loosely would have had half a database.
+
+Building the result separately makes the guarantee structural, rather than
+something each of a dozen early returns has to remember.
+
+### Atomic replacement, and what it does not buy
+
+`save()` writes to `<database>.tmp` and renames it over the database. The
+rename is one filesystem operation, so a reader sees either the whole old file
+or the whole new one. The scratch file sits beside the database rather than in
+the system temporary directory, because replacement is only atomic within one
+filesystem and the temp directory is frequently a different volume. An RAII
+guard removes the scratch file on every failure path, including an exception.
+
+What this does **not** provide is durability against power loss. MiniDB
+flushes to the operating system but does not `fsync` the file or its
+directory, so after `save()` returns the data may still sit in the page cache.
+Calling this "crash-safe" would be a lie; it is *atomic*, which is a different
+and weaker promise. Durability needs an explicit device flush, and that
+discussion belongs with the write-ahead log.
+
+### A corrupt database stops the CLI
+
+When `load()` fails, the CLI prints the reason and exits non-zero rather than
+starting empty. Continuing would be actively destructive: the session would
+end with a save, and that save would overwrite the damaged file with an empty
+snapshot, destroying whatever might have been recovered from it.
+
+Leaving the file untouched and telling the user to move it aside is less
+convenient and much easier to defend.
+
+### Saving on exit, not on every write
+
+Every mutation could trigger a save. That would make each `SET` O(n) in the
+size of the whole database, which is indefensible for a change to one key.
+
+So the CLI saves once, when the session ends normally. The consequence is
+stated plainly in the README and in the format document: a killed process
+loses its session. This is the honest shape of snapshot-only persistence, and
+pretending otherwise would misrepresent what Milestone 4 is for.
+
+### The default database location comes from the environment
+
+The path is built from `%LOCALAPPDATA%` on Windows and `$XDG_DATA_HOME` or
+`$HOME` elsewhere, falling back to the current directory when the environment
+says nothing. No absolute path is compiled in, and the default is deliberately
+outside the source tree so that running MiniDB never writes into the
+repository. The CLI also accepts a path argument, which is what makes manual
+testing possible without touching the user's real database.
+
+### A shared temp-directory helper for tests
+
+`tests/temp_directory.hpp` gives both the storage and database tests a unique
+scratch directory that deletes itself. It is RAII rather than a cleanup call at
+the end of each test, because a failing assertion leaves the case early and a
+destructor still runs where a trailing cleanup line would be skipped.
+
+Every path comes from `std::filesystem::temp_directory_path()`, so no test
+writes into the repository, touches the user's real database, or depends on a
+hard-coded path.
+
+### Known trade-offs
+
+- **Whole-file saves.** Changing one key rewrites everything. Incremental
+  update is what the log is for.
+- **No `fsync`.** Atomic, not durable. Stated everywhere it could mislead.
+- **No file locking.** Two processes on one database will overwrite each other.
+- **A 1 MiB key is allowed.** The key limit matches the value limit, which is
+  generous for a key. It is one constant in `types.hpp` if that ever matters.
+- **Duplicate detection costs memory.** The seen-set holds every key a second
+  time during load. An O(1)-memory alternative would mean sorting, which costs
+  time instead.

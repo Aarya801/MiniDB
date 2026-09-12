@@ -2,23 +2,30 @@
 #define MINIDB_DATABASE_HPP
 
 #include <cstddef>
+#include <filesystem>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <vector>
 
 #include "minidb/hash_table.hpp"
 #include "minidb/result.hpp"
+#include "minidb/storage.hpp"
 #include "minidb/types.hpp"
 
 namespace minidb {
 
 /// An in-memory key-value store.
 ///
-/// Entries live in MiniDB's own HashTable and are lost when the process
-/// exits; persistence arrives in Milestone 3. Milestone 1 used a
-/// std::unordered_map behind this same interface, and swapping it for the
-/// hand-written table changed one private member and three lines of
-/// database.cpp -- nothing in the CLI or the database tests moved.
+/// Entries live in MiniDB's own HashTable. A Database may additionally be
+/// bound to a snapshot file, in which case load() reads it and save() writes
+/// it; a default-constructed Database is purely in memory and touches no
+/// disk at all.
+///
+/// Coordination is all this class does. The hash table holds the data, the
+/// StorageManager turns records into bytes, and the CLI decides when to load
+/// and save. Database owns no serialisation logic and exposes none: callers
+/// cannot reach the file format through it.
 ///
 /// The class knows nothing about terminals or command syntax. Callers hand it
 /// keys and values and receive a Result; formatting replies is the CLI's job.
@@ -40,6 +47,42 @@ namespace minidb {
 /// can still cause.
 class Database {
 public:
+    /// An in-memory database. Nothing is read from or written to disk.
+    Database() = default;
+
+    /// A database bound to a snapshot file.
+    ///
+    /// Construction performs no I/O, so it cannot fail and needs no
+    /// exceptions. Call load() to read an existing snapshot.
+    explicit Database(std::filesystem::path snapshot_path);
+
+    /// True when this database is bound to a snapshot file.
+    [[nodiscard]] bool is_persistent() const noexcept { return storage_.has_value(); }
+
+    /// The snapshot path. Precondition: is_persistent().
+    [[nodiscard]] const std::filesystem::path& snapshot_path() const;
+
+    /// True when a snapshot file is already present, so a caller can tell a
+    /// first run from a reopened database. False when not persistent.
+    [[nodiscard]] bool snapshot_exists() const;
+
+    /// Replaces the contents of the database with the snapshot's.
+    ///
+    /// A missing snapshot is not a failure: the database is simply left
+    /// empty, which is what a first run should do. Any other failure -- a
+    /// damaged file, an unsupported version, an unreadable path -- is
+    /// returned, and the database is left exactly as it was. A corrupt
+    /// snapshot never turns into an empty database.
+    ///
+    /// O(n) in the number of records stored.
+    Result load();
+
+    /// Writes the entire database to the snapshot, replacing it.
+    ///
+    /// O(n) in the number of entries, in both time and the memory used to
+    /// collect them. Snapshots are whole-file: there is no partial save.
+    Result save() const;
+
     /// Stores `value` under `key`, replacing any existing entry.
     /// Fails with InvalidArgument for an empty key, KeyTooLarge or
     /// ValueTooLarge when the size limits in types.hpp are exceeded.
@@ -82,10 +125,17 @@ private:
         }
     };
 
+    using EntryTable = HashTable<Key, Value, StringHash>;
+
     /// HashTable compares with ==, and std::string == std::string_view
     /// already works, so the hasher above is all that is needed to keep
     /// lookups allocation-free.
-    HashTable<Key, Value, StringHash> entries_;
+    EntryTable entries_;
+
+    /// Absent for an in-memory database. An optional rather than a
+    /// StorageManager with an empty path, so "not persistent" is a state the
+    /// type can express instead of one every method has to check for.
+    std::optional<StorageManager> storage_;
 };
 
 }  // namespace minidb
