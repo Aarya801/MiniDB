@@ -627,3 +627,48 @@ multi-process coordination, full ACID, or future milestone work. OS stream
 flush is not guaranteed physical power-loss durability. There is no database
 identity in the WAL: files from unrelated databases or backup times must not be
 mixed. A checkpoint cannot detect such a mix when sequence numbers coincide.
+
+## Milestone 6: LRU cache
+
+`LruCache` is a bounded cache of key/value strings, implemented with
+`std::unordered_map` and `std::list` (a doubly linked list). The list front is
+most recently used; the back is least recently used. The map owns keys and
+indexes list iterators. GET and an existing-key PUT splice a node to the front
+without reallocating it. A new PUT installs one node, then removes the tail if
+over capacity. Contains inspects membership without promotion; erase removes
+both representations. Clear retains the configured capacity. Zero capacity
+stores nothing; capacity is an entry count, not a byte budget.
+
+Insertion allocates the new list node and map entry before evicting anything.
+A failed map allocation rolls back the new node. Copies rebuild the index so
+iterators never point into another cache's list; moves/swaps transfer both
+structures together. A moved-from cache is empty with zero capacity.
+
+Database uses a read-through cache, defaulting to 128 entries. Constructors
+accept an optional capacity (including zero). `get() const` checks the mutable
+cache first; a miss consults the authoritative custom HashTable and populates
+the cache on success. Missing keys are not cached. Mutable expresses logical
+constness: recency changes, database contents do not. cache_size/cache_capacity
+are read-only diagnostics; callers cannot insert unrelated cached values.
+
+SET and DELETE invalidate their entry after WAL append succeeds and before
+changing the table. CLEAR empties the cache after clearing the table. A failed
+WAL append leaves the old state valid. Successful recovery clears the cache
+when the replacement table is published; failed recovery preserves the old
+cache and old table. Save does not change values and need not clear the cache.
+Cache allocation failure on a read is ignored; copying the returned Result can
+still throw, as before. The cache is never serialized and cannot change WAL
+ordering, checkpoint state, or durability.
+
+Hash lookup and insertion are average O(1) in entry count; promotion and list
+unlink are O(1). Eviction selects the tail directly, with an average O(1) map
+erasure. Hash collisions can make map work O(C), and PUT has occasional rehash
+cost. String hashing/copying adds work proportional to key/value bytes. Copying
+a whole cache is O(C) expected; clear is O(C); size/capacity are O(1).
+
+This is an educational integration, not a claimed speedup: the authoritative
+hash table is already in memory. A cache miss does not issue a disk read.
+Snapshot load/save and WAL replay remain proportional to their input, and
+mutations retain their WAL write/flush costs. The cache duplicates data and adds
+bookkeeping; no benchmark numbers or performance claims are supplied. It is
+single-threaded, has no byte-budget eviction, and adds no Milestone 7 features.

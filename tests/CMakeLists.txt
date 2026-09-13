@@ -31,3 +31,4 @@ add_test(NAME test_recovery_process COMMAND ${CMAKE_COMMAND}
     "-DHELPER=$<TARGET_FILE:recovery_process>" "-DCLI=$<TARGET_FILE:minidb>"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/recovery_process.cmake")
 set_tests_properties(test_recovery_process PROPERTIES TIMEOUT 60)
+minidb_add_test(test_lru_cache)

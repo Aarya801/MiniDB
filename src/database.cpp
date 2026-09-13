@@ -1,5 +1,6 @@
 #include "minidb/database.hpp"
 
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,7 +24,8 @@ Result validate_key(std::string_view key) {
 
 }  // namespace
 
-Database::Database(std::filesystem::path snapshot_path) {
+Database::Database(std::filesystem::path snapshot_path, std::size_t cache_capacity)
+    : cache_(cache_capacity) {
     // The log lives beside the snapshot under a derived name, so one path
     // from the caller configures both files.
     std::filesystem::path log_path = snapshot_path;
@@ -111,6 +113,7 @@ Result Database::load() {
     }
 
     entries_ = std::move(recovered);
+    cache_.clear();
     loaded_ = true;
     return Result::ok();
 }
@@ -180,6 +183,7 @@ Result Database::set(std::string_view key, std::string_view value) {
         }
     }
 
+    cache_.erase(key);
     // insert_or_assign constructs a Key only when the entry is new, so
     // overwriting an existing key allocates nothing for the key itself.
     try {
@@ -199,10 +203,20 @@ Result Database::get(std::string_view key) const {
         return key_check;
     }
 
+    if (const Value* cached = cache_.get(key)) {
+        return Result::ok(*cached);
+    }
     const Value* value = entries_.find(key);
     if (value == nullptr) {
         // Deliberately no message: the CLI prints this verbatim as NOT_FOUND.
         return Result::failure(StatusCode::NotFound);
+    }
+    if (cache_.capacity() != 0) {
+        try {
+            cache_.put(Key(key), *value);
+        } catch (const std::bad_alloc&) {
+            // Optional caching must not fail an otherwise successful read.
+        }
     }
     return Result::ok(*value);
 }
@@ -233,6 +247,7 @@ Result Database::remove(std::string_view key) {
         }
     }
 
+    cache_.erase(key);
     entries_.erase(key);
     return Result::ok();
 }
@@ -267,6 +282,7 @@ Result Database::clear() {
     }
 
     entries_.clear();
+    cache_.clear();
     return Result::ok();
 }
 

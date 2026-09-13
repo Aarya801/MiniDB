@@ -73,6 +73,7 @@ add_library(minidb_core STATIC
     src/command_parser.cpp
     src/database.cpp
     src/hash_table.cpp
+    src/lru_cache.cpp
     src/result.cpp
     src/storage.cpp
     src/wal.cpp)

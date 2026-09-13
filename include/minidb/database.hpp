@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "minidb/hash_table.hpp"
+#include "minidb/lru_cache.hpp"
 #include "minidb/result.hpp"
 #include "minidb/storage.hpp"
 #include "minidb/types.hpp"
@@ -60,13 +61,16 @@ namespace minidb {
 class Database {
 public:
     /// An in-memory database. Nothing is read from or written to disk.
+    static constexpr std::size_t kDefaultCacheCapacity = 128;
     Database() = default;
+    explicit Database(std::size_t cache_capacity) : cache_(cache_capacity) {}
 
     /// A database bound to a snapshot file.
     ///
     /// Construction inspects WAL metadata but reads no records.
     /// Call load() before reads. The first mutation/save recovers automatically.
-    explicit Database(std::filesystem::path snapshot_path);
+    explicit Database(std::filesystem::path snapshot_path,
+                      std::size_t cache_capacity = kDefaultCacheCapacity);
 
     /// True when this database is bound to a snapshot file.
     [[nodiscard]] bool is_persistent() const noexcept { return storage_.has_value(); }
@@ -145,6 +149,10 @@ public:
     /// back.
     Result clear();
 
+    /// Cache diagnostics; capacity counts entries, not bytes. Zero disables it.
+    [[nodiscard]] std::size_t cache_size() const noexcept { return cache_.size(); }
+    [[nodiscard]] std::size_t cache_capacity() const noexcept { return cache_.capacity(); }
+
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept;
 
@@ -176,6 +184,8 @@ private:
     /// already works, so the hasher above is all that is needed to keep
     /// lookups allocation-free.
     EntryTable entries_;
+    // Logical constness: GET changes cache recency, never authoritative data.
+    mutable LruCache cache_{kDefaultCacheCapacity};
 
     /// Both absent for an in-memory database, both present for a persistent
     /// one. Optionals rather than objects with empty paths, so "not

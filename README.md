@@ -4,7 +4,7 @@ An educational persistent key-value database engine built from scratch in modern
 
 MiniDB is a learning project. It develops the mechanisms a real storage engine
 depends on — a hash table, a binary on-disk format, a write-ahead log, crash
-recovery, with an LRU cache, transactions and thread-safe access planned — at a size that can
+recovery and an LRU cache, with transactions and thread-safe access planned — at a size that can
 be read and understood in an afternoon. It is not a production database, and the
 [Limitations](#limitations) section says plainly what it does not do.
 
@@ -22,7 +22,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 3** — persistent binary snapshots with atomic replacement
 - [x] **Milestone 4** — write-ahead log and startup replay
 - [x] **Milestone 5** — checkpoint-aware crash recovery
-- [ ] Milestone 6 — LRU cache
+- [x] **Milestone 6** — LRU read cache
 - [ ] Milestone 7 — transactions
 - [ ] Milestone 8 — concurrency
 - [ ] Milestone 9 — benchmarks
@@ -189,6 +189,7 @@ version-1 snapshots remain readable; the next save upgrades them to version 2.
 flowchart TD
     CLI[CLI] --> Parser[Command parser]
     Parser --> Database[Database API]
+    Database --> Cache[LRU read cache]
     Database --> HashTable[HashTable - separate chaining]
 
     Parser -.-> Result[Result / StatusCode]
@@ -219,6 +220,27 @@ Each component has one job:
 
 Both the parser and the database report problems through the same `Result` /
 `StatusCode` pair from Milestone 0, so the CLI has one error model to render.
+
+## LRU read cache
+
+GET checks a 128-entry LRU cache first. A miss reads the authoritative in-memory
+hash table and caches a successful result. SET/DELETE invalidate affected
+entries; CLEAR and successful recovery clear the cache. The snapshot and WAL
+formats are unchanged. Failed writes/recovery preserve the previous valid state.
+
+The cache uses `std::unordered_map` plus a doubly linked `std::list`: average
+O(1) lookup/PUT, O(1) list promotion and tail unlink, average O(1) map removal
+for eviction. Hash collisions/rehash and string hashing/copying add costs;
+these bounds are in entry count, not bytes. Clear is O(C), size/capacity O(1).
+
+Library callers can use `Database(0)` or `Database(path, 0)` to disable caching,
+or supply another entry capacity. `cache_size()` and `cache_capacity()` expose
+read-only diagnostics. Existing constructors and const GET remain supported.
+
+This is an educational cache over data already in RAM, not a disk-page cache
+or a measured performance improvement. It duplicates values, has no byte-budget
+or thread-safety guarantee, and leaves snapshot/WAL I/O complexity unchanged.
+See [Learning notes](docs/LEARNING_NOTES.md) for an access-order example.
 
 ## The hash table
 
@@ -299,6 +321,7 @@ ctest --test-dir build -R test_database -V
 | Suite | Covers |
 | --- | --- |
 | `test_recovery` / `test_recovery_process` | Checkpoints, legacy files, malformed recovery inputs, truncated tails, abrupt subprocess exit and CLI restart |
+| `test_lru_cache` | Recency, eviction, zero/one capacity, copy/move safety, mixed-operation model, Database invalidation and recovery |
 | `test_wal` | Binary encoding, replay, torn tails, corruption, length limits, failed I/O, snapshot/reset ordering, restart recovery |
 | `test_storage` | Round trips, corrupt magic, bad version, truncation at every offset, invalid lengths, overflow attempts, duplicate keys, checksum failures, scratch-file cleanup |
 | `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
@@ -312,7 +335,7 @@ third-party library. The reasoning is in
 
 ## Limitations
 
-As of Milestone 5, MiniDB does **not**:
+As of Milestone 6, MiniDB does **not**:
 
 - Guarantee durability against power loss. Saves are not `fsync`ed.
 - Update the snapshot incrementally. Every save rewrites the whole file, so

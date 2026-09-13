@@ -495,3 +495,58 @@ Every exit from the function runs the destructor, including one caused by an
 exception. The success path calls `keep()`. This is the same idea as
 `unique_ptr` freeing memory, applied to a file: the resource is released by
 leaving the scope, not by remembering to say so.
+
+## LRU: finding a value and remembering access order
+
+An LRU cache evicts the least recently used entry when it runs out of room.
+A hash map answers “where is this key?” but does not efficiently answer “which
+key was used longest ago?” A doubly linked list supplies that ordering.
+
+MiniDB stores key/value nodes in `std::list`, with MRU at the front and LRU at
+the back. `std::unordered_map` maps keys to list iterators. The iterator means
+GET can locate a node by hash lookup and splice it to the front without walking
+the list. Both links are available, so unlinking a middle node is constant time.
+
+For capacity two (left is MRU):
+
+| Operation | Order afterward | Result |
+| --- | --- | --- |
+| PUT a=1 | a | Insert |
+| PUT b=2 | b, a | Insert |
+| GET a | a, b | Return 1 and promote a |
+| PUT c=3 | c, a | Evict b |
+| PUT a=4 | a, c | Update and promote a |
+
+Contains does not promote. A missing GET does not change order. Capacity zero
+is a disabled cache; capacity one keeps at most the last inserted/accessed key.
+Eviction removes exactly one entry when a successful new insertion exceeds the
+capacity. It never deletes the authoritative database entry.
+
+### Where this fits in Database
+
+GET → cache hit → copy the cached value into Result.
+
+GET → cache miss → look up the in-memory HashTable → cache the found value →
+return it. A missing key remains NotFound and is not cached.
+
+SET/DELETE invalidate the affected cache entry only after successful WAL append.
+The next GET reads the authoritative value again. CLEAR and successful recovery
+empty the cache. A failed recovery leaves the previous table/cache consistent.
+The cache starts empty on restart and is rebuilt from reads; it is never stored
+in the snapshot or WAL. Existing `get() const` works because recency is mutable
+implementation state, not a modification of the logical database contents.
+
+### Complexity needs units
+
+For C cached entries, hash lookup/PUT are average O(1), but can be O(C) under
+collisions or during rehash. Promotion and selecting/unlinking the LRU tail are
+O(1); eviction's map removal is average O(1). A key of K bytes still takes O(K)
+to hash, and copying a value of V bytes takes O(V). Size and capacity are O(1);
+clear walks C entries. The list and map use O(C) metadata plus stored bytes.
+
+A cache hit does not make disk access O(1). MiniDB already loads its authoritative
+state into memory; a miss reads that table, not a disk page. Snapshot operations
+and WAL recovery keep their existing whole-input costs. This cache can even add
+overhead, so its value here is learning the data structure and keeping cached
+copies correct. Capacity limits entries, not RAM bytes. There is no concurrent
+access support and no claimed benchmark improvement.
