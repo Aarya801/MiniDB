@@ -1,8 +1,8 @@
-# Write-Ahead Log and Crash Recovery (Milestones 4–5)
+# Write-Ahead Log, Transactions, and Crash Recovery (Milestones 4–7)
 
 MiniDB keeps `<snapshot>` and `<snapshot>.wal`. Database saves now use a
 version-2 snapshot with a checkpoint; version-1 snapshots remain readable.
-The WAL layout remains version 1 and records SET, DELETE, and CLEAR.
+The WAL layout remains version 1 and records SET, DELETE, CLEAR, and TRANSACTION.
 This is an educational, single-owner database; it does not provide full ACID.
 
 ## Binary format, version 1
@@ -15,7 +15,7 @@ writing C++ structs. Keys and values are opaque bytes, including embedded NULs.
 | --- | --- | --- |
 | 0 | 4 | Magic: ASCII `MWAL` |
 | 4 | 2 | Version: 1 |
-| 6 | 2 | Operation: SET=1, DELETE=2, CLEAR=3 |
+| 6 | 2 | Operation: SET=1, DELETE=2, CLEAR=3, TRANSACTION=4 |
 | 8 | 8 | Sequence: monotonic; resumes at checkpoint + 1 after reset |
 | 16 | 4 | Key length |
 | 20 | 4 | Value length |
@@ -37,6 +37,17 @@ Database sequences continue from the snapshot checkpoint after reset and cannot
 wrap. Direct WAL callers pass the checkpoint to replay/reset; omitting it retains
 the original standalone behavior (checkpoint zero).
 
+TRANSACTION uses an empty outer key and stores a 4-byte mutation count followed
+by that many entries in its value payload. Each entry is `operation:u16`,
+`key_length:u32`, `value_length:u32`, then its key and value bytes. Inner
+operations may be SET or DELETE only and obey their normal field limits. The
+complete transaction payload is limited to 1 MiB and cannot be empty. Repeated
+changes to one key are collapsed before encoding. All integers remain
+little-endian. The outer record's CRC covers the complete payload.
+Milestone 7 readers understand operation 4; earlier binaries reject such a
+record as an unknown operation even though the outer record layout stays at
+version 1.
+
 ## Write path and durability
 
 1. Validate the request. Before the first persistent mutation or save, recover
@@ -44,6 +55,9 @@ the original standalone behavior (checkpoint zero).
 2. Encode and append the entire record to the WAL.
 3. Flush the C++ stream to the OS, explicitly close it, and check stream state.
 4. Only on success, apply the mutation to the in-memory hash table.
+
+For COMMIT, step 2 writes one outer TRANSACTION record. The full post-commit
+table is prepared before the append and published only after append success.
 
 A missing-key DELETE returns NotFound without logging. CLEAR uses one record
 so recovery cannot restore entries cleared by the existing API. The in-memory
@@ -99,6 +113,11 @@ lengths, wrong sequences, unknown operations, and complete checksum failures
 are rejected, including in the final record. Unsupported versions return
 UnsupportedVersion; other format damage returns CorruptData. Rejected files
 are preserved and no partially parsed record vector is returned.
+
+The same policy applies to transactions: a short outer record is discarded in
+full, while a complete record with an invalid count, inner operation, length,
+trailing data, or checksum fails recovery. Replay expands a valid transaction
+into its SET/DELETE mutations only after validating the entire payload.
 
 ## Snapshot interaction
 
@@ -162,8 +181,10 @@ Replay holds decoded records and a recovered table in memory; its cost depends
 on total WAL bytes and operations. The 256 MiB disk cap does not imply a 256 MiB
 RAM cap: record objects, strings, and hash-table nodes add overhead. Snapshots
 remain whole-file saves. There is no file locking, concurrent writer support,
-transaction protocol, background checkpointing, log rotation, or production
+concurrent transaction protocol, background checkpointing, log rotation, or production
 storage guarantee. This is an educational single-process database with no
 distributed recovery, multi-process coordination, or full ACID claim.
-OS flush is not guaranteed physical power-loss durability. Milestone 6 and
-later are not implemented here.
+OS flush is not guaranteed physical power-loss durability. Transactions provide
+logical all-or-nothing replay of one complete WAL record, not device-level
+atomic durability, isolation between concurrent actors, or an exactly-once
+commit protocol.

@@ -89,7 +89,7 @@ namespace {
     return Command{type, Key(key), Value{}};
 }
 
-/// KEYS, CLEAR, HELP and EXIT take nothing at all.
+/// KEYS, CLEAR, transaction control, HELP and EXIT take nothing at all.
 [[nodiscard]] ParseOutcome parse_without_arguments(CommandType type, std::string_view name,
                                                    std::string_view rest) {
     if (!trim(rest).empty()) {
@@ -125,6 +125,15 @@ ParseOutcome parse_command(std::string_view line) {
     }
     if (equals_ignore_case(name, "CLEAR")) {
         return parse_without_arguments(CommandType::Clear, "CLEAR", rest);
+    }
+    if (equals_ignore_case(name, "BEGIN")) {
+        return parse_without_arguments(CommandType::Begin, "BEGIN", rest);
+    }
+    if (equals_ignore_case(name, "COMMIT")) {
+        return parse_without_arguments(CommandType::Commit, "COMMIT", rest);
+    }
+    if (equals_ignore_case(name, "ROLLBACK")) {
+        return parse_without_arguments(CommandType::Rollback, "ROLLBACK", rest);
     }
     if (equals_ignore_case(name, "HELP")) {
         return parse_without_arguments(CommandType::Help, "HELP", rest);

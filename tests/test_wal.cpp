@@ -11,6 +11,7 @@
 using minidb::Database;
 using minidb::StatusCode;
 using minidb::WalOperation;
+using minidb::WalMutation;
 using minidb::WalRecord;
 using minidb::WriteAheadLog;
 using minidb::testing::read_file;
@@ -79,6 +80,78 @@ TEST(replay_independently_encoded_binary_records) {
     EXPECT_TRUE(log.append_set("next", "").is_ok());
     EXPECT_TRUE(log.replay(records).is_ok());
     EXPECT_EQ(records.size(), std::size_t{3});
+}
+TEST(transaction_record_replays_all_inner_mutations_with_one_sequence) {
+    std::string payload;
+    integer(payload, 2, 4);
+    integer(payload, 1, 2);
+    integer(payload, 1, 4);
+    integer(payload, 1, 4);
+    payload += "a1";
+    integer(payload, 2, 2);
+    integer(payload, 1, 4);
+    integer(payload, 0, 4);
+    payload += "b";
+
+    const TempDirectory dir;
+    ASSERT_TRUE(write_file(dir.file("log"), record(4, 1, {}, payload)));
+    WriteAheadLog log(dir.file("log"));
+    std::vector<WalRecord> records;
+    ASSERT_TRUE(log.replay(records).is_ok());
+    ASSERT_TRUE(records.size() == 2);
+    EXPECT_EQ(records[0].operation, WalOperation::Set);
+    EXPECT_EQ(records[0].key, std::string("a"));
+    EXPECT_EQ(records[0].value, std::string("1"));
+    EXPECT_EQ(records[0].sequence, std::uint64_t{1});
+    EXPECT_EQ(records[1].operation, WalOperation::Delete);
+    EXPECT_EQ(records[1].key, std::string("b"));
+    EXPECT_EQ(records[1].sequence, std::uint64_t{1});
+}
+TEST(transaction_append_uses_one_outer_wal_record) {
+    const TempDirectory dir;
+    WriteAheadLog log(dir.file("log"));
+    const std::vector<WalMutation> changes = {
+        {WalOperation::Set, "a", "1"}, {WalOperation::Delete, "b", {}}};
+    ASSERT_TRUE(log.append_transaction(changes).is_ok());
+    EXPECT_EQ(log.last_sequence(), std::uint64_t{1});
+    EXPECT_EQ(read_file(log.path()).substr(6, 2), std::string("\x04\x00", 2));
+}
+TEST(malformed_transaction_payloads_are_rejected_after_valid_crc) {
+    std::string zero_count;
+    integer(zero_count, 0, 4);
+    rejects(record(4, 1, {}, zero_count));
+
+    std::string impossible_count;
+    integer(impossible_count, 2, 4);
+    integer(impossible_count, 1, 2);
+    integer(impossible_count, 1, 4);
+    integer(impossible_count, 0, 4);
+    impossible_count += "a";
+    rejects(record(4, 1, {}, impossible_count));
+
+    std::string bad_operation;
+    integer(bad_operation, 1, 4);
+    integer(bad_operation, 99, 2);
+    integer(bad_operation, 1, 4);
+    integer(bad_operation, 0, 4);
+    bad_operation += "a";
+    rejects(record(4, 1, {}, bad_operation));
+
+    std::string bad_lengths;
+    integer(bad_lengths, 1, 4);
+    integer(bad_lengths, 1, 2);
+    integer(bad_lengths, 2, 4);
+    integer(bad_lengths, 0, 4);
+    bad_lengths += "a";
+    rejects(record(4, 1, {}, bad_lengths));
+
+    std::string trailing;
+    integer(trailing, 1, 4);
+    integer(trailing, 1, 2);
+    integer(trailing, 1, 4);
+    integer(trailing, 0, 4);
+    trailing += "ax";
+    rejects(record(4, 1, {}, trailing));
 }
 TEST(missing_and_empty_wal) {
     const TempDirectory dir;

@@ -21,6 +21,14 @@ enum class WalOperation : std::uint16_t {
     Set = 1,
     Delete = 2,
     Clear = 3,
+    Transaction = 4,
+};
+
+/// One logical mutation encoded inside a batched transaction WAL record.
+struct WalMutation {
+    WalOperation operation;
+    Key key;
+    Value value;
 };
 
 /// One decoded log record. `key` and `value` are empty where the operation
@@ -76,6 +84,9 @@ public:
     /// + value_length(4) + record_crc32(4)
     static constexpr std::size_t kRecordHeaderSize = 28;
 
+    /// Keeps a transaction record bounded and validates before allocation.
+    static constexpr std::size_t kMaxTransactionPayload = limits::kMaxValueSize;
+
     /// The first sequence number when no snapshot checkpoint is supplied.
     static constexpr std::uint64_t kFirstSequence = 1;
 
@@ -99,6 +110,7 @@ public:
     Result append_set(std::string_view key, std::string_view value);
     Result append_delete(std::string_view key);
     Result append_clear();
+    Result append_transaction(const std::vector<WalMutation>& mutations);
 
     /// Validates every complete record but returns only sequences newer than
     /// checkpoint. Clears records first and establishes the tail for appends.

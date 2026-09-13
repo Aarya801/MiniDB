@@ -17,6 +17,9 @@
 
 namespace minidb {
 
+class Transaction;
+struct TransactionMutation;
+
 /// An in-memory key-value store.
 ///
 /// Entries live in MiniDB's own HashTable. A Database may additionally be
@@ -157,6 +160,8 @@ public:
     [[nodiscard]] bool empty() const noexcept;
 
 private:
+    friend class Transaction;
+    Result commit_transaction(const std::vector<TransactionMutation>& mutations);
     Result ensure_loaded();
     /// Hashes a std::string_view, so HashTable can look up a key without
     /// first constructing a std::string. Without it every get, exists and

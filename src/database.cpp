@@ -1,5 +1,7 @@
 #include "minidb/database.hpp"
 
+#include "minidb/transaction.hpp"
+
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -48,6 +50,9 @@ void Database::apply_recovered(EntryTable& table, const WalRecord& record) {
             break;
         case WalOperation::Clear:
             table.clear();
+            break;
+        case WalOperation::Transaction:
+            // replay() expands transaction records into SET/DELETE records.
             break;
     }
 }
@@ -122,6 +127,46 @@ Result Database::ensure_loaded() {
     if (storage_.has_value() && !loaded_) {
         return load();
     }
+    return Result::ok();
+}
+
+Result Database::commit_transaction(const std::vector<TransactionMutation>& mutations) {
+    if (mutations.empty()) {
+        return Result::ok();
+    }
+    Result ready = ensure_loaded();
+    if (!ready.is_ok()) {
+        return ready;
+    }
+
+    // Build the complete post-commit table before touching the WAL. Any
+    // allocation failure therefore leaves both durable and in-memory state alone.
+    EntryTable committed(entries_);
+    std::vector<WalMutation> logged;
+    logged.reserve(mutations.size());
+    for (const TransactionMutation& mutation : mutations) {
+        switch (mutation.operation) {
+            case TransactionOperation::Set:
+                committed.insert_or_assign(mutation.key, mutation.value);
+                logged.push_back(WalMutation{WalOperation::Set, mutation.key, mutation.value});
+                break;
+            case TransactionOperation::Delete:
+                committed.erase(mutation.key);
+                logged.push_back(WalMutation{WalOperation::Delete, mutation.key, {}});
+                break;
+        }
+    }
+
+    if (wal_.has_value()) {
+        Result appended = wal_->append_transaction(logged);
+        if (!appended.is_ok()) {
+            loaded_ = false;
+            return appended;
+        }
+    }
+
+    entries_ = std::move(committed);
+    cache_.clear();
     return Result::ok();
 }
 

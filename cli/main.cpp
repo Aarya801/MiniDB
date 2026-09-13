@@ -19,6 +19,7 @@
 #include "minidb/database.hpp"
 #include "minidb/result.hpp"
 #include "minidb/storage.hpp"
+#include "minidb/transaction.hpp"
 #include "minidb/types.hpp"
 
 namespace {
@@ -48,6 +49,9 @@ void print_help(std::ostream& out) {
         << "  EXISTS <key>        Print true or false.\n"
         << "  KEYS                List every key.\n"
         << "  CLEAR               Remove every key.\n"
+        << "  BEGIN               Start a transaction.\n"
+        << "  COMMIT              Commit its changes.\n"
+        << "  ROLLBACK            Discard its changes.\n"
         << "  HELP                Show this message.\n"
         << "  EXIT                Save and end the session.\n"
         << "\n"
@@ -61,10 +65,13 @@ bool is_blank(std::string_view line) noexcept {
 
 /// Runs one command against the database and writes the reply.
 /// Returns false when the session should end.
-bool execute(const minidb::Command& command, minidb::Database& database, std::ostream& out) {
+bool execute(const minidb::Command& command, minidb::Database& database,
+             minidb::Transaction& transaction, std::ostream& out) {
     switch (command.type) {
         case minidb::CommandType::Set: {
-            const minidb::Result result = database.set(command.key, command.value);
+            const minidb::Result result = transaction.active()
+                                              ? transaction.set(command.key, command.value)
+                                              : database.set(command.key, command.value);
             // A successful set carries no payload, so "OK" is the CLI's word
             // for it rather than something the engine returns.
             out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
@@ -72,20 +79,26 @@ bool execute(const minidb::Command& command, minidb::Database& database, std::os
         }
         case minidb::CommandType::Get: {
             // On success this prints the value; on failure, NOT_FOUND.
-            out << database.get(command.key).to_display_string() << "\n";
+            const minidb::Result result =
+                transaction.active() ? transaction.get(command.key) : database.get(command.key);
+            out << result.to_display_string() << "\n";
             break;
         }
         case minidb::CommandType::Delete: {
-            const minidb::Result result = database.remove(command.key);
+            const minidb::Result result = transaction.active() ? transaction.remove(command.key)
+                                                               : database.remove(command.key);
             out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
             break;
         }
         case minidb::CommandType::Exists: {
-            out << (database.exists(command.key) ? "true" : "false") << "\n";
+            const bool exists = transaction.active() ? transaction.exists(command.key)
+                                                     : database.exists(command.key);
+            out << (exists ? "true" : "false") << "\n";
             break;
         }
         case minidb::CommandType::Keys: {
-            std::vector<minidb::Key> keys = database.keys();
+            std::vector<minidb::Key> keys =
+                transaction.active() ? transaction.keys() : database.keys();
             if (keys.empty()) {
                 out << "(empty)\n";
                 break;
@@ -100,7 +113,23 @@ bool execute(const minidb::Command& command, minidb::Database& database, std::os
         }
         case minidb::CommandType::Clear: {
             // Clearing is logged before it is applied, so it can fail.
-            const minidb::Result result = database.clear();
+            const minidb::Result result =
+                transaction.active() ? transaction.clear() : database.clear();
+            out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
+            break;
+        }
+        case minidb::CommandType::Begin: {
+            const minidb::Result result = transaction.begin();
+            out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
+            break;
+        }
+        case minidb::CommandType::Commit: {
+            const minidb::Result result = transaction.commit();
+            out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
+            break;
+        }
+        case minidb::CommandType::Rollback: {
+            const minidb::Result result = transaction.rollback();
             out << (result.is_ok() ? "OK" : result.to_display_string()) << "\n";
             break;
         }
@@ -109,6 +138,10 @@ bool execute(const minidb::Command& command, minidb::Database& database, std::os
             break;
         }
         case minidb::CommandType::Exit: {
+            if (transaction.active()) {
+                static_cast<void>(transaction.rollback());
+                out << "Rolled back active transaction.\n";
+            }
             out << "Goodbye!\n";
             return false;
         }
@@ -117,6 +150,7 @@ bool execute(const minidb::Command& command, minidb::Database& database, std::os
 }
 
 void run_session(minidb::Database& database) {
+    minidb::Transaction transaction(database);
     std::string line;
     while (true) {
         std::cout << kPrompt << std::flush;
@@ -124,6 +158,10 @@ void run_session(minidb::Database& database) {
         // getline fails at end of input -- Ctrl+D, Ctrl+Z, or a piped script
         // running out. That is a normal way to finish, not an error.
         if (!std::getline(std::cin, line)) {
+            if (transaction.active()) {
+                static_cast<void>(transaction.rollback());
+                std::cout << "\nRolled back active transaction.";
+            }
             std::cout << "\nGoodbye!\n";
             return;
         }
@@ -136,7 +174,7 @@ void run_session(minidb::Database& database) {
             std::cout << error->to_display_string() << "\n";
             continue;
         }
-        if (!execute(std::get<minidb::Command>(outcome), database, std::cout)) {
+        if (!execute(std::get<minidb::Command>(outcome), database, transaction, std::cout)) {
             return;
         }
     }

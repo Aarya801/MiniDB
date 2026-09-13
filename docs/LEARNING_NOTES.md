@@ -550,3 +550,44 @@ and WAL recovery keep their existing whole-input costs. This cache can even add
 overhead, so its value here is learning the data structure and keeping cached
 copies correct. Capacity limits entries, not RAM bytes. There is no concurrent
 access support and no claimed benchmark improvement.
+
+## Transactions: private changes, then one publication
+
+A transaction separates tentative changes from the database everyone else
+sees. MiniDB represents that private view as an unordered map. A stored value
+means “SET this key”; an empty optional means “DELETE this key.” GET first asks
+the map and only falls through to Database when the key has no local decision.
+That is the small mechanism behind read-your-writes:
+
+```text
+database: name = Old
+BEGIN
+SET name Temporary       overlay: name = Temporary
+GET name                 returns Temporary
+ROLLBACK                 discard overlay
+GET name                 returns Old
+```
+
+COMMIT has two separate atomicity problems. Memory must not expose half the
+keys, and recovery must not replay half the keys. MiniDB first applies all
+changes to a copied hash table. It also encodes all final changes inside one
+outer WAL record. Only after that record is written does a nonthrowing move
+publish the copied table. Recovery validates the outer checksum and every inner
+entry before returning any of them.
+
+This is logical atomicity, with a precise boundary. A truncated final WAL
+record is discarded in full. It is not physical power-loss durability: an OS
+flush can still be sitting in volatile caches. An I/O error can also leave the
+caller unsure whether the complete record reached the file, so reopening and
+replaying establishes the state.
+
+The overlay naturally reduces `SET x 1; SET x 2` to `x=2`, and turns
+`DELETE x; SET x 3` into `x=3`. For `t` distinct changed keys, those local
+operations are average O(1). Commit sorts them in O(t log t), copies O(n)
+database entries, and writes bytes proportional to the encoded transaction.
+Rollback destroys O(t) local entries and performs no durable write.
+
+No concurrency control follows from this design. Two library Transaction
+objects can both exist, but MiniDB does not coordinate them, isolate direct
+Database writes, or detect write conflicts. There is no MVCC or named isolation
+level. Milestone 8 is where concurrent access can be designed explicitly.

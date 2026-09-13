@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <utility>
@@ -33,7 +34,8 @@ constexpr std::size_t kChecksumedHeaderBytes = kChecksumOffset;
 [[nodiscard]] bool is_known_operation(std::uint16_t value) noexcept {
     return value == static_cast<std::uint16_t>(WalOperation::Set) ||
            value == static_cast<std::uint16_t>(WalOperation::Delete) ||
-           value == static_cast<std::uint16_t>(WalOperation::Clear);
+           value == static_cast<std::uint16_t>(WalOperation::Clear) ||
+           value == static_cast<std::uint16_t>(WalOperation::Transaction);
 }
 
 [[nodiscard]] const char* operation_name(WalOperation operation) noexcept {
@@ -44,6 +46,8 @@ constexpr std::size_t kChecksumedHeaderBytes = kChecksumOffset;
             return "DELETE";
         case WalOperation::Clear:
             return "CLEAR";
+        case WalOperation::Transaction:
+            return "TRANSACTION";
     }
     return "UNKNOWN";
 }
@@ -84,8 +88,117 @@ constexpr std::size_t kChecksumedHeaderBytes = kChecksumOffset;
                                        "CLEAR record carries a key or value, which it must not");
             }
             return Result::ok();
+
+        case WalOperation::Transaction:
+            if (key_length != 0 || value_length < sizeof(std::uint32_t) ||
+                value_length > WriteAheadLog::kMaxTransactionPayload) {
+                return Result::failure(StatusCode::CorruptData,
+                                       "TRANSACTION record has invalid payload lengths");
+            }
+            return Result::ok();
     }
     return Result::failure(StatusCode::CorruptData, "unknown log operation");
+}
+
+[[nodiscard]] Result encode_transaction_payload(const std::vector<WalMutation>& mutations,
+                                                std::string& payload) {
+    if (mutations.empty()) {
+        return Result::failure(StatusCode::InvalidArgument,
+                               "cannot append an empty transaction record");
+    }
+    if (mutations.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return Result::failure(StatusCode::InvalidArgument, "transaction has too many mutations");
+    }
+
+    std::size_t encoded_size = sizeof(std::uint32_t);
+    for (const WalMutation& mutation : mutations) {
+        if (mutation.operation != WalOperation::Set && mutation.operation != WalOperation::Delete) {
+            return Result::failure(StatusCode::InvalidArgument,
+                                   "transaction contains an unsupported operation");
+        }
+        Result fields =
+            validate_fields(mutation.operation, mutation.key.size(), mutation.value.size());
+        if (!fields.is_ok()) {
+            return fields;
+        }
+        constexpr std::size_t kMutationHeaderSize = 10;
+        const std::size_t bytes = kMutationHeaderSize + mutation.key.size() + mutation.value.size();
+        if (bytes > WriteAheadLog::kMaxTransactionPayload - encoded_size) {
+            return Result::failure(StatusCode::InvalidArgument,
+                                   "transaction exceeds the WAL payload limit");
+        }
+        encoded_size += bytes;
+    }
+
+    payload.clear();
+    payload.reserve(encoded_size);
+    detail::append_u32(payload, static_cast<std::uint32_t>(mutations.size()));
+    for (const WalMutation& mutation : mutations) {
+        detail::append_u16(payload, static_cast<std::uint16_t>(mutation.operation));
+        detail::append_u32(payload, static_cast<std::uint32_t>(mutation.key.size()));
+        detail::append_u32(payload, static_cast<std::uint32_t>(mutation.value.size()));
+        payload.append(mutation.key);
+        payload.append(mutation.value);
+    }
+    return Result::ok();
+}
+
+[[nodiscard]] Result decode_transaction_payload(std::string_view payload, std::uint64_t sequence,
+                                                std::vector<WalRecord>& records) {
+    constexpr std::size_t kCountSize = 4;
+    constexpr std::size_t kMutationHeaderSize = 10;
+    if (payload.size() < kCountSize) {
+        return Result::failure(StatusCode::CorruptData, "transaction payload is too small");
+    }
+    const std::uint32_t count = detail::read_u32(payload.data());
+    if (count == 0 || count > (payload.size() - kCountSize) / (kMutationHeaderSize + 1)) {
+        return Result::failure(StatusCode::CorruptData,
+                               "transaction mutation count cannot fit in its payload");
+    }
+
+    std::vector<WalRecord> decoded;
+    decoded.reserve(count);
+    std::size_t offset = kCountSize;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (payload.size() - offset < kMutationHeaderSize) {
+            return Result::failure(StatusCode::CorruptData,
+                                   "transaction ends inside a mutation header");
+        }
+        const std::uint16_t raw_operation = detail::read_u16(payload.data() + offset);
+        const std::uint32_t key_length = detail::read_u32(payload.data() + offset + 2);
+        const std::uint32_t value_length = detail::read_u32(payload.data() + offset + 6);
+        offset += kMutationHeaderSize;
+        if (raw_operation != static_cast<std::uint16_t>(WalOperation::Set) &&
+            raw_operation != static_cast<std::uint16_t>(WalOperation::Delete)) {
+            return Result::failure(StatusCode::CorruptData,
+                                   "transaction contains an invalid operation");
+        }
+        const WalOperation operation = static_cast<WalOperation>(raw_operation);
+        Result fields = validate_fields(operation, key_length, value_length);
+        if (!fields.is_ok()) {
+            return Result::failure(StatusCode::CorruptData,
+                                   "transaction mutation has invalid lengths");
+        }
+        const std::size_t data_size =
+            static_cast<std::size_t>(key_length) + static_cast<std::size_t>(value_length);
+        if (data_size > payload.size() - offset) {
+            return Result::failure(StatusCode::CorruptData,
+                                   "transaction mutation exceeds its payload");
+        }
+        WalRecord record{operation, sequence, {}, {}};
+        record.key.assign(payload.data() + offset, key_length);
+        offset += key_length;
+        record.value.assign(payload.data() + offset, value_length);
+        offset += value_length;
+        decoded.push_back(std::move(record));
+    }
+    if (offset != payload.size()) {
+        return Result::failure(StatusCode::CorruptData,
+                               "transaction has unexpected trailing bytes");
+    }
+    records.insert(records.end(), std::make_move_iterator(decoded.begin()),
+                   std::make_move_iterator(decoded.end()));
+    return Result::ok();
 }
 
 /// Builds the exact bytes of one record, checksum included.
@@ -144,6 +257,15 @@ Result WriteAheadLog::append_delete(std::string_view key) {
 
 Result WriteAheadLog::append_clear() {
     return append(WalOperation::Clear, {}, {});
+}
+
+Result WriteAheadLog::append_transaction(const std::vector<WalMutation>& mutations) {
+    std::string payload;
+    Result encoded = encode_transaction_payload(mutations, payload);
+    if (!encoded.is_ok()) {
+        return encoded;
+    }
+    return append(WalOperation::Transaction, {}, payload);
 }
 
 Result WriteAheadLog::append(WalOperation operation, std::string_view key, std::string_view value) {
@@ -371,7 +493,20 @@ Result WriteAheadLog::replay(std::vector<WalRecord>& records, std::uint64_t chec
         }
 
         if (sequence > checkpoint) {
-            parsed.push_back(std::move(record));
+            if (operation == WalOperation::Transaction) {
+                Result decoded = decode_transaction_payload(record.value, sequence, parsed);
+                if (!decoded.is_ok()) {
+                    return decoded;
+                }
+            } else {
+                parsed.push_back(std::move(record));
+            }
+        } else if (operation == WalOperation::Transaction) {
+            std::vector<WalRecord> validated;
+            Result decoded = decode_transaction_payload(record.value, sequence, validated);
+            if (!decoded.is_ok()) {
+                return decoded;
+            }
         }
         previous_sequence = sequence;
         offset += kRecordHeaderSize + payload_bytes;

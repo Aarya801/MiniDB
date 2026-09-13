@@ -672,3 +672,46 @@ Snapshot load/save and WAL replay remain proportional to their input, and
 mutations retain their WAL write/flush costs. The cache duplicates data and adds
 bookkeeping; no benchmark numbers or performance claims are supplied. It is
 single-threaded, has no byte-budget eviction, and adds no Milestone 7 features.
+
+## Milestone 7: single-process transactions
+
+`Transaction` is a small coordinator bound to a `Database`, rather than
+transaction flags spread through Database and the CLI. Its unordered-map
+overlay stores either a value or a tombstone for each changed key. That makes
+read-your-writes lookup average O(1), collapses repeated writes naturally, and
+keeps uncommitted state out of the authoritative table, WAL, snapshot, and
+cache. The CLI owns one coordinator and routes all data commands through its
+local view while active. EXIT and end-of-input roll it back.
+
+COMMIT prepares a copy of the complete hash table before touching durable
+state. Final per-key effects are sorted for deterministic output and encoded in
+one WAL TRANSACTION record. Only SET and DELETE are valid inner operations.
+The outer record carries the existing sequence and CRC, and its value contains
+a count plus length-delimited mutations. Replay validates the whole payload
+into a temporary vector before returning any mutation. This means a complete
+record applies logically as a unit, while an incomplete final record is trimmed
+as a unit under the existing torn-tail policy. An empty commit needs no record.
+
+After a successful append, move assignment publishes the prepared HashTable
+without throwing and the cache is cleared. Local reads may still use/populate
+the cache for unchanged database values; local writes never enter it. Rollback
+only destroys the overlay, so the cache remains valid. Clearing all entries on
+commit is simple and correct at the current small capacity, though targeted
+invalidation could reduce cold misses later.
+
+One transaction record was chosen over appending independent SET/DELETE
+records: a process crash between independent appends would expose a prefix.
+The record payload is capped at 1 MiB to keep corrupt-input validation and
+memory use bounded. Larger transactions fail commit. The in-memory staging
+copy also costs O(n) time and memory, and sorting `t` changed keys costs
+O(t log t). This deliberately favors clear all-or-nothing publication over
+throughput.
+
+The guarantee is limited. C++ stream flush and close do not force physical
+media, so power loss and filesystem reordering are outside it. An append error
+can be reported after a complete record reached the OS; the transaction becomes
+inactive and the Database requires recovery, so the caller must reopen to learn
+the resulting state. There is no exactly-once request identity. This is one
+single-process coordinator with no locking, MVCC, nested transactions,
+savepoints, concurrent transaction semantics, advanced isolation level,
+multi-process coordination, distributed recovery, or full ACID claim.

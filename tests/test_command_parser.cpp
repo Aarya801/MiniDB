@@ -130,6 +130,18 @@ TEST(argumentless_commands_parse) {
     ASSERT_TRUE(parsed(clear));
     EXPECT_TRUE(std::get<Command>(clear).type == CommandType::Clear);
 
+    const ParseOutcome begin = parse_command("BEGIN");
+    ASSERT_TRUE(parsed(begin));
+    EXPECT_TRUE(std::get<Command>(begin).type == CommandType::Begin);
+
+    const ParseOutcome commit = parse_command("COMMIT");
+    ASSERT_TRUE(parsed(commit));
+    EXPECT_TRUE(std::get<Command>(commit).type == CommandType::Commit);
+
+    const ParseOutcome rollback = parse_command("ROLLBACK");
+    ASSERT_TRUE(parsed(rollback));
+    EXPECT_TRUE(std::get<Command>(rollback).type == CommandType::Rollback);
+
     const ParseOutcome help = parse_command("HELP");
     ASSERT_TRUE(parsed(help));
     EXPECT_TRUE(std::get<Command>(help).type == CommandType::Help);
@@ -148,6 +160,9 @@ TEST(argumentless_commands_tolerate_surrounding_whitespace) {
 TEST(argumentless_commands_reject_arguments) {
     EXPECT_EQ(failure_code(parse_command("KEYS extra")), StatusCode::InvalidArgument);
     EXPECT_EQ(failure_code(parse_command("CLEAR everything")), StatusCode::InvalidArgument);
+    EXPECT_EQ(failure_code(parse_command("BEGIN again")), StatusCode::InvalidArgument);
+    EXPECT_EQ(failure_code(parse_command("COMMIT now")), StatusCode::InvalidArgument);
+    EXPECT_EQ(failure_code(parse_command("ROLLBACK now")), StatusCode::InvalidArgument);
     EXPECT_EQ(failure_code(parse_command("HELP me")), StatusCode::InvalidArgument);
     EXPECT_EQ(failure_code(parse_command("EXIT now")), StatusCode::InvalidArgument);
 }
@@ -162,6 +177,9 @@ TEST(command_names_are_case_insensitive) {
     EXPECT_TRUE(parsed(parse_command("sEt k v")));
     EXPECT_TRUE(parsed(parse_command("get k")));
     EXPECT_TRUE(parsed(parse_command("keys")));
+    EXPECT_TRUE(parsed(parse_command("BeGiN")));
+    EXPECT_TRUE(parsed(parse_command("commit")));
+    EXPECT_TRUE(parsed(parse_command("RollBack")));
     EXPECT_TRUE(parsed(parse_command("ExIt")));
 }
 

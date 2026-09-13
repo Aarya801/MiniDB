@@ -17,6 +17,9 @@ enum class CommandType {
     Exists,
     Keys,
     Clear,
+    Begin,
+    Commit,
+    Rollback,
     Help,
     Exit,
 };

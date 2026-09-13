@@ -76,6 +76,7 @@ add_library(minidb_core STATIC
     src/lru_cache.cpp
     src/result.cpp
     src/storage.cpp
+    src/transaction.cpp
     src/wal.cpp)
 
 target_include_directories(minidb_core PUBLIC
