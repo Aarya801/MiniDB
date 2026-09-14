@@ -4,13 +4,14 @@ An educational persistent key-value database engine built from scratch in modern
 
 MiniDB is a learning project. It develops the mechanisms a real storage engine
 depends on — a hash table, a binary on-disk format, a write-ahead log, crash
-recovery, an LRU cache, and single-process transactions, with thread-safe access planned — at a size that can
+recovery, an LRU cache, single-process transactions, and thread-safe library access — at a size that can
 be read and understood in an afternoon. It is not a production database, and the
 [Limitations](#limitations) section says plainly what it does not do.
 
 > **Current state:** MiniDB stores data on disk and reloads it on startup.
 > Individual mutations and committed transactions are logged and flushed to the OS before changing memory.
 > Startup loads the snapshot and replays only WAL operations newer than its checkpoint. Power-loss durability is not provided.
+> Calls on one `Database` are synchronized; this is a correctness design, not a scalability claim.
 
 ## Status
 
@@ -24,7 +25,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 5** — checkpoint-aware crash recovery
 - [x] **Milestone 6** — LRU read cache
 - [x] **Milestone 7** — single-process transactions
-- [ ] Milestone 8 — concurrency
+- [x] **Milestone 8** — single-process concurrency and thread safety
 - [ ] Milestone 9 — benchmarks
 
 ## What works today
@@ -245,7 +246,8 @@ read-only diagnostics. Existing constructors and const GET remain supported.
 
 This is an educational cache over data already in RAM, not a disk-page cache
 or a measured performance improvement. It duplicates values, has no byte-budget
-or thread-safety guarantee, and leaves snapshot/WAL I/O complexity unchanged.
+eviction, and leaves snapshot/WAL I/O complexity unchanged. Database protects
+cache recency with a dedicated mutex.
 See [Learning notes](docs/LEARNING_NOTES.md) for an access-order example.
 
 ## Transactions
@@ -272,8 +274,28 @@ This gives logical all-or-nothing application within this single process and
 during WAL recovery. It does not provide full ACID durability: stream flush is
 not a device barrier, and an I/O error while appending can leave the commit
 outcome uncertain until the database is reopened. There is one transaction
-coordinator per CLI session, no MVCC, locking, concurrent-transaction guarantee,
-or advanced isolation level. See [Transaction design](docs/TRANSACTIONS.md).
+coordinator per CLI session and no MVCC, conflict detection, repeatable-read
+guarantee, or advanced isolation level. See [Transaction design](docs/TRANSACTIONS.md).
+
+## Concurrency model
+
+Ordinary calls on one `Database` are thread-safe. A database-level
+`std::shared_mutex` lets GET, EXISTS, KEYS, size, and other read-only state
+operations overlap. SET, DELETE, CLEAR, recovery, save, and transaction commit
+take its exclusive lock. A separate `std::mutex` protects LRU membership and
+recency; every path that needs both locks takes the database lock first.
+
+Each `Transaction` has its own mutex, so calls on the same transaction object
+cannot race. Independent transaction objects may coexist and their commits are
+serialized by Database, but they have no snapshot isolation or conflict
+detection. A transaction may observe commits made after its BEGIN.
+
+Long snapshot, recovery, WAL, and commit work holds the exclusive database
+lock, so it blocks all other operations. Cache hits briefly serialize on the
+cache mutex. Separate Database objects that point to the same files are not
+coordinated. The low-level HashTable, LruCache, StorageManager, and
+WriteAheadLog types require caller synchronization when used directly. See
+[Concurrency](docs/CONCURRENCY.md) for the full contract and lock order.
 
 ## The hash table
 
@@ -359,6 +381,7 @@ ctest --test-dir build -R test_database -V
 | `test_recovery` / `test_recovery_process` | Checkpoints, legacy files, malformed recovery inputs, truncated tails, abrupt subprocess exit and CLI restart |
 | `test_lru_cache` | Recency, eviction, zero/one capacity, copy/move safety, mixed-operation model, Database invalidation and recovery |
 | `test_transaction` / `test_transaction_cli` | Local visibility, commit/rollback, WAL batching and torn records, cache interaction, restart persistence, command errors |
+| `test_concurrency` | Concurrent reads/writes, LRU consistency, shared Transaction access, serialized commits, save/WAL/recovery interaction |
 | `test_wal` | Binary encoding, replay, torn tails, corruption, length limits, failed I/O, snapshot/reset ordering, restart recovery |
 | `test_storage` | Round trips, corrupt magic, bad version, truncation at every offset, invalid lengths, overflow attempts, duplicate keys, checksum failures, scratch-file cleanup |
 | `test_hash_table` | Insert, lookup, update, erase, clear, resizing, forced collisions, chain surgery, rehash preservation, value semantics |
@@ -372,14 +395,16 @@ third-party library. The reasoning is in
 
 ## Limitations
 
-As of Milestone 7, MiniDB does **not**:
+As of Milestone 8, MiniDB does **not**:
 
 - Guarantee durability against power loss. Saves are not `fsync`ed.
 - Update the snapshot incrementally. Every save rewrites the whole file, so
   saving is O(n) however small the change.
 - Coordinate between processes. There is no locking, and two MiniDB processes
   on one database will overwrite each other.
-- Support concurrent access, concurrent transactions, MVCC, or advanced isolation levels.
+- Provide snapshot isolation, MVCC, conflict detection, or advanced isolation levels.
+- Coordinate separate Database instances that point at the same snapshot/WAL files.
+- Promise high write scalability; writes and persistence operations use one exclusive lock.
 - Guarantee the outcome of a commit whose WAL append reports an I/O error;
   reopen and recover the database before deciding what became durable.
 - Allow spaces in keys, since arguments are whitespace-separated.
@@ -398,6 +423,7 @@ And it is not intended to ever implement:
 
 - [WAL format and recovery](docs/WAL.md) — mutation records, durability, and limitations
 - [Transactions](docs/TRANSACTIONS.md) — lifecycle, visibility, WAL/cache interaction, and guarantees
+- [Concurrency](docs/CONCURRENCY.md) — protected state, lock modes, ordering, and limitations
 - [Storage format](docs/STORAGE_FORMAT.md) — the snapshot layout, byte by byte
 - [Design decisions](docs/DESIGN_DECISIONS.md) — why things are built the way they are
 - [Learning notes](docs/LEARNING_NOTES.md) — the concepts behind the code, explained from scratch

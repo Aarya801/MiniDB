@@ -61,8 +61,8 @@ O(t log t), copies O(n) database entries for strong in-memory publication, and
 encodes/writes O(transaction bytes). The overlay uses O(t) memory and the staged
 commit table uses O(n) additional memory.
 
-There is no MVCC, locking, nested transaction, advanced isolation level,
-savepoint, multi-process coordination, concurrent transaction guarantee,
-distributed recovery, or exactly-once client protocol. Direct library callers
-must coordinate access to the bound `Database`; concurrency is deferred to
-Milestone 8.
+Milestone 8 serializes calls on one Transaction object and serializes commits
+through Database. There is still no MVCC, nested transaction, advanced
+isolation level, savepoint, conflict detection, multi-process coordination,
+distributed recovery, or exactly-once client protocol. Independent
+transactions may observe each other's committed changes between operations.

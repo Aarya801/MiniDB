@@ -715,3 +715,47 @@ the resulting state. There is no exactly-once request identity. This is one
 single-process coordinator with no locking, MVCC, nested transactions,
 savepoints, concurrent transaction semantics, advanced isolation level,
 multi-process coordination, distributed recovery, or full ACID claim.
+
+## Milestone 8: database-level synchronization
+
+One `std::shared_mutex` protects Database's authoritative HashTable, WAL and
+snapshot lifecycle, recovery metadata, and transaction publication. Read-only
+table operations use `std::shared_lock`; SET, DELETE, CLEAR, load, save, and
+commit use `std::unique_lock`. Keeping persistent I/O under the same exclusive
+lock preserves the existing WAL-before-memory and snapshot-before-reset order
+without exposing intermediate state to another thread.
+
+A small writer mutex serializes attempts to acquire that exclusive state lock.
+Writers were already mutually exclusive, so it does not remove useful
+parallelism. It gives exclusive acquisition one portable entry point while
+shared readers continue to overlap.
+
+LRU GET changes recency, so it is not read-only implementation state. A
+separate `std::mutex` protects all cache operations. Database GET holds a shared
+state lock, briefly checks the cache, reads the table on a miss, then briefly
+locks the cache again to populate it. Writers hold the exclusive state lock
+before invalidating or clearing the cache. This permits table reads such as
+EXISTS and KEYS to overlap and permits cache-miss table lookups to overlap,
+while keeping cached values tied to the protected table version.
+
+Each Transaction has one mutex around its active flag and overlay. Helper
+functions perform nested GET/KEYS work without recursively locking that
+non-recursive mutex. The global order is Transaction → writer → state → cache;
+Database never calls Transaction and no cache path asks for the state lock.
+Copy and move operations snapshot one source before locking a destination, so
+no operation holds state locks from two Database objects simultaneously.
+
+Database copy and move support is retained because earlier milestones exposed
+and tested value semantics. The mutexes themselves are never copied or moved;
+the protected state is copied or moved while holding the source locks.
+Concurrent destruction or assignment is excluded, matching standard container
+lifetime rules.
+
+This design chooses correctness and auditability over throughput. WAL writes,
+snapshot I/O, recovery, and O(n) transaction staging hold the exclusive lock.
+Cache hits serialize briefly, and `std::shared_mutex` provides no fairness
+promise. Locks are per Database instance, so two instances on the same files
+remain unsafe. Low-level containers and persistence types require external
+synchronization when used outside Database. There is no MVCC, snapshot
+isolation, conflict detection, file locking, multi-process coordination, or
+scalability claim.

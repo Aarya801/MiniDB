@@ -5,6 +5,8 @@ project(MiniDB
     DESCRIPTION "An educational persistent key-value database engine in modern C++20"
     LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 # --------------------------------------------------------------------------
 # Global settings
 # --------------------------------------------------------------------------
@@ -82,7 +84,7 @@ add_library(minidb_core STATIC
 target_include_directories(minidb_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
-target_link_libraries(minidb_core PRIVATE minidb_warnings)
+target_link_libraries(minidb_core PRIVATE minidb_warnings Threads::Threads)
 
 # Single source of truth for the version: the number lives in project() above.
 target_compile_definitions(minidb_core PUBLIC MINIDB_VERSION="${PROJECT_VERSION}")

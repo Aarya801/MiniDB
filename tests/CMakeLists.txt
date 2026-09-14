@@ -33,6 +33,7 @@ add_test(NAME test_recovery_process COMMAND ${CMAKE_COMMAND}
 set_tests_properties(test_recovery_process PROPERTIES TIMEOUT 60)
 minidb_add_test(test_lru_cache)
 minidb_add_test(test_transaction)
+minidb_add_test(test_concurrency)
 
 add_test(NAME test_transaction_cli COMMAND ${CMAKE_COMMAND}
     "-DCLI=$<TARGET_FILE:minidb>"

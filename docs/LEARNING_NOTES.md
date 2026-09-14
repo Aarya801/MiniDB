@@ -587,7 +587,38 @@ operations are average O(1). Commit sorts them in O(t log t), copies O(n)
 database entries, and writes bytes proportional to the encoded transaction.
 Rollback destroys O(t) local entries and performs no durable write.
 
-No concurrency control follows from this design. Two library Transaction
-objects can both exist, but MiniDB does not coordinate them, isolate direct
-Database writes, or detect write conflicts. There is no MVCC or named isolation
-level. Milestone 8 is where concurrent access can be designed explicitly.
+Milestone 7 had no concurrency control. Milestone 8 serializes calls on a
+Transaction object and serializes commits through Database, while deliberately
+leaving conflict detection, MVCC, and named isolation levels out.
+
+## Concurrency: protect invariants, not individual variables
+
+A mutex is useful when it protects a relationship. MiniDB's important
+relationship is “the table, WAL sequence, checkpoint state, and cache describe
+one coherent database.” Locking only the table would still let two threads
+append the same WAL sequence or let save truncate records written while it was
+building a snapshot.
+
+The database therefore uses a reader/writer lock around that whole state.
+Several readers can hold a shared lock together. A writer takes the exclusive
+lock and waits for every reader and writer to leave. The critical section is
+large, including file I/O, but its boundary is easy to reason about:
+
+```text
+GET:     shared state lock -> cache lock when needed
+SET:     exclusive state lock -> WAL -> cache invalidation -> table
+COMMIT:  transaction lock -> writer lock -> exclusive state lock -> WAL -> table -> cache
+SAVE:    exclusive state lock -> snapshot -> WAL reset
+```
+
+The LRU needs its own ordinary mutex because GET promotes an entry and therefore
+mutates list links. The state lock stays held while a miss is read and cached,
+preventing a writer from changing the value between those steps. The fixed lock
+order matters more than lock count: a cycle requires one path to take them in
+the opposite order, and MiniDB has no such path.
+
+Thread safety does not create transaction isolation. Two transaction overlays
+can read at different moments and then commit in either order. Their memory is
+safe and their commits do not partially overlap, but same-key conflicts are not
+detected. It also does not coordinate two Database objects that happen to name
+the same files, because their mutexes are different objects.

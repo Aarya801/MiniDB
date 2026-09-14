@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -33,7 +34,18 @@ std::size_t Transaction::StringHash::operator()(std::string_view key) const noex
     return std::hash<std::string_view>{}(key);
 }
 
+bool Transaction::active() const {
+    std::lock_guard lock(mutex_);
+    return active_;
+}
+
+std::size_t Transaction::change_count() const {
+    std::lock_guard lock(mutex_);
+    return changes_.size();
+}
+
 Result Transaction::begin() {
+    std::lock_guard lock(mutex_);
     if (active_) {
         return Result::failure(StatusCode::InvalidTransactionState,
                                "a transaction is already active");
@@ -48,6 +60,7 @@ Result Transaction::begin() {
 }
 
 Result Transaction::set(std::string_view key, std::string_view value) {
+    std::lock_guard lock(mutex_);
     if (!active_) {
         return inactive_error("SET");
     }
@@ -64,6 +77,11 @@ Result Transaction::set(std::string_view key, std::string_view value) {
 }
 
 Result Transaction::get(std::string_view key) const {
+    std::lock_guard lock(mutex_);
+    return get_unlocked(key);
+}
+
+Result Transaction::get_unlocked(std::string_view key) const {
     if (!active_) {
         return inactive_error("GET");
     }
@@ -80,10 +98,11 @@ Result Transaction::get(std::string_view key) const {
 }
 
 Result Transaction::remove(std::string_view key) {
+    std::lock_guard lock(mutex_);
     if (!active_) {
         return inactive_error("DELETE");
     }
-    Result current = get(key);
+    Result current = get_unlocked(key);
     if (!current.is_ok()) {
         return current;
     }
@@ -92,10 +111,16 @@ Result Transaction::remove(std::string_view key) {
 }
 
 bool Transaction::exists(std::string_view key) const {
-    return active_ && get(key).is_ok();
+    std::lock_guard lock(mutex_);
+    return active_ && get_unlocked(key).is_ok();
 }
 
 std::vector<Key> Transaction::keys() const {
+    std::lock_guard lock(mutex_);
+    return keys_unlocked();
+}
+
+std::vector<Key> Transaction::keys_unlocked() const {
     if (!active_) {
         return {};
     }
@@ -114,16 +139,18 @@ std::vector<Key> Transaction::keys() const {
 }
 
 Result Transaction::clear() {
+    std::lock_guard lock(mutex_);
     if (!active_) {
         return inactive_error("CLEAR");
     }
-    for (Key& key : keys()) {
+    for (Key& key : keys_unlocked()) {
         changes_.insert_or_assign(std::move(key), std::nullopt);
     }
     return Result::ok();
 }
 
 Result Transaction::commit() {
+    std::lock_guard lock(mutex_);
     if (!active_) {
         return inactive_error("COMMIT");
     }
@@ -146,6 +173,7 @@ Result Transaction::commit() {
 }
 
 Result Transaction::rollback() {
+    std::lock_guard lock(mutex_);
     if (!active_) {
         return inactive_error("ROLLBACK");
     }

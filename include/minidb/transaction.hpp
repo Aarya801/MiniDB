@@ -2,6 +2,7 @@
 #define MINIDB_TRANSACTION_HPP
 
 #include <cstddef>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -27,6 +28,8 @@ struct TransactionMutation {
 
 /// A single active/inactive transaction bound to one Database.
 /// Changes remain in this overlay until commit; rollback only drops the overlay.
+/// Calls on one Transaction are serialized, but multiple Transaction objects
+/// have no snapshot isolation or conflict detection. See docs/CONCURRENCY.md.
 class Transaction {
 public:
     explicit Transaction(Database& database) noexcept : database_(database) {}
@@ -35,8 +38,8 @@ public:
     Transaction(Transaction&&) = delete;
     Transaction& operator=(Transaction&&) = delete;
 
-    [[nodiscard]] bool active() const noexcept { return active_; }
-    [[nodiscard]] std::size_t change_count() const noexcept { return changes_.size(); }
+    [[nodiscard]] bool active() const;
+    [[nodiscard]] std::size_t change_count() const;
 
     Result begin();
     Result set(std::string_view key, std::string_view value);
@@ -56,7 +59,11 @@ private:
 
     using Changes = std::unordered_map<Key, std::optional<Value>, StringHash, std::equal_to<>>;
 
+    [[nodiscard]] Result get_unlocked(std::string_view key) const;
+    [[nodiscard]] std::vector<Key> keys_unlocked() const;
+
     Database& database_;
+    mutable std::mutex mutex_;
     Changes changes_;
     bool active_ = false;
 };

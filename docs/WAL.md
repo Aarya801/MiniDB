@@ -180,8 +180,9 @@ Append costs O(key bytes + value bytes), plus an open, write, flush, and close.
 Replay holds decoded records and a recovered table in memory; its cost depends
 on total WAL bytes and operations. The 256 MiB disk cap does not imply a 256 MiB
 RAM cap: record objects, strings, and hash-table nodes add overhead. Snapshots
-remain whole-file saves. There is no file locking, concurrent writer support,
-concurrent transaction protocol, background checkpointing, log rotation, or production
+remain whole-file saves. Database serializes WAL access from its threads, but
+WriteAheadLog is not independently synchronized. There is no file locking,
+cross-instance writer coordination, advanced transaction protocol, background checkpointing, log rotation, or production
 storage guarantee. This is an educational single-process database with no
 distributed recovery, multi-process coordination, or full ACID claim.
 OS flush is not guaranteed physical power-loss durability. Transactions provide

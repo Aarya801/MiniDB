@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string_view>
 #include <vector>
 
@@ -61,12 +63,22 @@ struct TransactionMutation;
 /// table enforces by rehashing at 0.75. A lookup degrades toward O(n) when
 /// many keys collide into one bucket, which unlucky or adversarial key sets
 /// can still cause.
+///
+/// Thread safety: ordinary public operations may be called concurrently on
+/// one Database. Reads share the state lock; mutations, recovery, snapshots,
+/// and transaction commits are exclusive. Cache recency has a separate mutex.
+/// Object destruction and assignment still require exclusive ownership, as
+/// they do for standard-library containers. See docs/CONCURRENCY.md.
 class Database {
 public:
     /// An in-memory database. Nothing is read from or written to disk.
     static constexpr std::size_t kDefaultCacheCapacity = 128;
     Database() = default;
     explicit Database(std::size_t cache_capacity) : cache_(cache_capacity) {}
+    Database(const Database& other);
+    Database& operator=(const Database& other);
+    Database(Database&& other);
+    Database& operator=(Database&& other);
 
     /// A database bound to a snapshot file.
     ///
@@ -76,7 +88,7 @@ public:
                       std::size_t cache_capacity = kDefaultCacheCapacity);
 
     /// True when this database is bound to a snapshot file.
-    [[nodiscard]] bool is_persistent() const noexcept { return storage_.has_value(); }
+    [[nodiscard]] bool is_persistent() const;
 
     /// The snapshot path. Precondition: is_persistent().
     [[nodiscard]] const std::filesystem::path& snapshot_path() const;
@@ -108,9 +120,7 @@ public:
 
     /// Number of logged operations replayed by the last load(). Lets the CLI
     /// tell the user that work was recovered.
-    [[nodiscard]] std::size_t replayed_operation_count() const noexcept {
-        return replayed_operation_count_;
-    }
+    [[nodiscard]] std::size_t replayed_operation_count() const;
 
     /// Writes the entire database to the snapshot, then resets the log.
     ///
@@ -153,16 +163,18 @@ public:
     Result clear();
 
     /// Cache diagnostics; capacity counts entries, not bytes. Zero disables it.
-    [[nodiscard]] std::size_t cache_size() const noexcept { return cache_.size(); }
-    [[nodiscard]] std::size_t cache_capacity() const noexcept { return cache_.capacity(); }
+    [[nodiscard]] std::size_t cache_size() const;
+    [[nodiscard]] std::size_t cache_capacity() const;
 
-    [[nodiscard]] std::size_t size() const noexcept;
-    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] bool empty() const;
 
 private:
     friend class Transaction;
     Result commit_transaction(const std::vector<TransactionMutation>& mutations);
     Result ensure_loaded();
+    Result ensure_loaded_unlocked();
+    Result load_unlocked();
     /// Hashes a std::string_view, so HashTable can look up a key without
     /// first constructing a std::string. Without it every get, exists and
     /// remove would allocate a temporary string purely to throw it away --
@@ -188,8 +200,15 @@ private:
     /// HashTable compares with ==, and std::string == std::string_view
     /// already works, so the hasher above is all that is needed to keep
     /// lookups allocation-free.
+    /// Serializes exclusive state-lock acquisition. Writers were already
+    /// exclusive; this also keeps acquisition portable across C++ runtimes.
+    mutable std::mutex writer_mutex_;
+    /// Protects entries_, persistence state, WAL sequencing, and recovery
+    /// metadata. It is always acquired before cache_mutex_ when both are needed.
+    mutable std::shared_mutex state_mutex_;
     EntryTable entries_;
     // Logical constness: GET changes cache recency, never authoritative data.
+    mutable std::mutex cache_mutex_;
     mutable LruCache cache_{kDefaultCacheCapacity};
 
     /// Both absent for an in-memory database, both present for a persistent

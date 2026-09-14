@@ -3,6 +3,8 @@
 #include "minidb/transaction.hpp"
 
 #include <new>
+#include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -37,6 +39,67 @@ Database::Database(std::filesystem::path snapshot_path, std::size_t cache_capaci
     wal_.emplace(std::move(log_path));
 }
 
+Database::Database(const Database& other) {
+    std::shared_lock state_lock(other.state_mutex_);
+    std::lock_guard cache_lock(other.cache_mutex_);
+    entries_ = other.entries_;
+    cache_ = other.cache_;
+    storage_ = other.storage_;
+    wal_ = other.wal_;
+    replayed_operation_count_ = other.replayed_operation_count_;
+    loaded_ = other.loaded_;
+}
+
+Database& Database::operator=(const Database& other) {
+    if (this == &other) {
+        return *this;
+    }
+    Database copy(other);
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock state_lock(state_mutex_);
+    std::lock_guard cache_lock(cache_mutex_);
+    entries_ = std::move(copy.entries_);
+    cache_ = std::move(copy.cache_);
+    storage_ = std::move(copy.storage_);
+    wal_ = std::move(copy.wal_);
+    replayed_operation_count_ = copy.replayed_operation_count_;
+    loaded_ = copy.loaded_;
+    return *this;
+}
+
+Database::Database(Database&& other) {
+    std::lock_guard writer_lock(other.writer_mutex_);
+    std::unique_lock state_lock(other.state_mutex_);
+    std::lock_guard cache_lock(other.cache_mutex_);
+    entries_ = std::move(other.entries_);
+    cache_ = std::move(other.cache_);
+    storage_ = std::move(other.storage_);
+    wal_ = std::move(other.wal_);
+    replayed_operation_count_ = other.replayed_operation_count_;
+    loaded_ = other.loaded_;
+    other.storage_.reset();
+    other.wal_.reset();
+    other.replayed_operation_count_ = 0;
+    other.loaded_ = false;
+}
+
+Database& Database::operator=(Database&& other) {
+    if (this == &other) {
+        return *this;
+    }
+    Database moved(std::move(other));
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock state_lock(state_mutex_);
+    std::lock_guard cache_lock(cache_mutex_);
+    entries_ = std::move(moved.entries_);
+    cache_ = std::move(moved.cache_);
+    storage_ = std::move(moved.storage_);
+    wal_ = std::move(moved.wal_);
+    replayed_operation_count_ = moved.replayed_operation_count_;
+    loaded_ = moved.loaded_;
+    return *this;
+}
+
 void Database::apply_recovered(EntryTable& table, const WalRecord& record) {
     switch (record.operation) {
         case WalOperation::Set:
@@ -58,6 +121,7 @@ void Database::apply_recovered(EntryTable& table, const WalRecord& record) {
 }
 
 const std::filesystem::path& Database::snapshot_path() const {
+    std::shared_lock lock(state_mutex_);
     if (!storage_.has_value()) {
         throw std::logic_error("Database::snapshot_path called on an in-memory database");
     }
@@ -65,10 +129,17 @@ const std::filesystem::path& Database::snapshot_path() const {
 }
 
 bool Database::snapshot_exists() const {
+    std::shared_lock lock(state_mutex_);
     return storage_.has_value() && storage_->snapshot_exists();
 }
 
+bool Database::is_persistent() const {
+    std::shared_lock lock(state_mutex_);
+    return storage_.has_value();
+}
+
 const std::filesystem::path& Database::wal_path() const {
+    std::shared_lock lock(state_mutex_);
     if (!wal_.has_value()) {
         throw std::logic_error("Database::wal_path called on an in-memory database");
     }
@@ -76,6 +147,12 @@ const std::filesystem::path& Database::wal_path() const {
 }
 
 Result Database::load() {
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
+    return load_unlocked();
+}
+
+Result Database::load_unlocked() {
     if (!storage_.has_value()) {
         return Result::failure(StatusCode::InvalidArgument,
                                "this database is in memory only and has nothing to load");
@@ -118,23 +195,34 @@ Result Database::load() {
     }
 
     entries_ = std::move(recovered);
-    cache_.clear();
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        cache_.clear();
+    }
     loaded_ = true;
     return Result::ok();
 }
 
 Result Database::ensure_loaded() {
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
+    return ensure_loaded_unlocked();
+}
+
+Result Database::ensure_loaded_unlocked() {
     if (storage_.has_value() && !loaded_) {
-        return load();
+        return load_unlocked();
     }
     return Result::ok();
 }
 
 Result Database::commit_transaction(const std::vector<TransactionMutation>& mutations) {
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
     if (mutations.empty()) {
         return Result::ok();
     }
-    Result ready = ensure_loaded();
+    Result ready = ensure_loaded_unlocked();
     if (!ready.is_ok()) {
         return ready;
     }
@@ -166,17 +254,22 @@ Result Database::commit_transaction(const std::vector<TransactionMutation>& muta
     }
 
     entries_ = std::move(committed);
-    cache_.clear();
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        cache_.clear();
+    }
     return Result::ok();
 }
 
 Result Database::save() {
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
     if (!storage_.has_value()) {
         return Result::failure(StatusCode::InvalidArgument,
                                "this database is in memory only and cannot be saved");
     }
 
-    Result ready = ensure_loaded();
+    Result ready = ensure_loaded_unlocked();
     if (!ready.is_ok()) {
         return ready;
     }
@@ -212,7 +305,9 @@ Result Database::set(std::string_view key, std::string_view value) {
                                "value exceeds " + std::to_string(limits::kMaxValueSize) + " bytes");
     }
 
-    Result ready = ensure_loaded();
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
+    Result ready = ensure_loaded_unlocked();
     if (!ready.is_ok()) {
         return ready;
     }
@@ -228,7 +323,10 @@ Result Database::set(std::string_view key, std::string_view value) {
         }
     }
 
-    cache_.erase(key);
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        cache_.erase(key);
+    }
     // insert_or_assign constructs a Key only when the entry is new, so
     // overwriting an existing key allocates nothing for the key itself.
     try {
@@ -248,15 +346,23 @@ Result Database::get(std::string_view key) const {
         return key_check;
     }
 
-    if (const Value* cached = cache_.get(key)) {
-        return Result::ok(*cached);
+    std::shared_lock lock(state_mutex_);
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        if (const Value* cached = cache_.get(key)) {
+            return Result::ok(*cached);
+        }
     }
     const Value* value = entries_.find(key);
     if (value == nullptr) {
         // Deliberately no message: the CLI prints this verbatim as NOT_FOUND.
         return Result::failure(StatusCode::NotFound);
     }
-    if (cache_.capacity() != 0) {
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        if (cache_.capacity() == 0) {
+            return Result::ok(*value);
+        }
         try {
             cache_.put(Key(key), *value);
         } catch (const std::bad_alloc&) {
@@ -272,7 +378,9 @@ Result Database::remove(std::string_view key) {
         return key_check;
     }
 
-    Result ready = ensure_loaded();
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
+    Result ready = ensure_loaded_unlocked();
     if (!ready.is_ok()) {
         return ready;
     }
@@ -292,7 +400,10 @@ Result Database::remove(std::string_view key) {
         }
     }
 
-    cache_.erase(key);
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        cache_.erase(key);
+    }
     entries_.erase(key);
     return Result::ok();
 }
@@ -301,10 +412,12 @@ bool Database::exists(std::string_view key) const {
     if (!validate_key(key).is_ok()) {
         return false;
     }
+    std::shared_lock lock(state_mutex_);
     return entries_.contains(key);
 }
 
 std::vector<Key> Database::keys() const {
+    std::shared_lock lock(state_mutex_);
     std::vector<Key> result;
     result.reserve(entries_.size());
     entries_.for_each([&result](const Key& key, const Value&) { result.push_back(key); });
@@ -312,7 +425,9 @@ std::vector<Key> Database::keys() const {
 }
 
 Result Database::clear() {
-    Result ready = ensure_loaded();
+    std::lock_guard writer_lock(writer_mutex_);
+    std::unique_lock lock(state_mutex_);
+    Result ready = ensure_loaded_unlocked();
     if (!ready.is_ok()) {
         return ready;
     }
@@ -327,15 +442,35 @@ Result Database::clear() {
     }
 
     entries_.clear();
-    cache_.clear();
+    {
+        std::lock_guard cache_lock(cache_mutex_);
+        cache_.clear();
+    }
     return Result::ok();
 }
 
-std::size_t Database::size() const noexcept {
+std::size_t Database::cache_size() const {
+    std::lock_guard lock(cache_mutex_);
+    return cache_.size();
+}
+
+std::size_t Database::cache_capacity() const {
+    std::lock_guard lock(cache_mutex_);
+    return cache_.capacity();
+}
+
+std::size_t Database::replayed_operation_count() const {
+    std::shared_lock lock(state_mutex_);
+    return replayed_operation_count_;
+}
+
+std::size_t Database::size() const {
+    std::shared_lock lock(state_mutex_);
     return entries_.size();
 }
 
-bool Database::empty() const noexcept {
+bool Database::empty() const {
+    std::shared_lock lock(state_mutex_);
     return entries_.empty();
 }
 
