@@ -264,8 +264,7 @@ TEST(checkpointed_transaction_wal_record_is_validated_but_not_replayed) {
 
     // Simulate a crash after the new snapshot was installed but before WAL
     // reset. The checkpoint says sequence 1 is already represented.
-    const std::vector<minidb::Record> snapshot = {{"name", "Aarya"},
-                                                   {"language", "C++"}};
+    const std::vector<minidb::Record> snapshot = {{"name", "Aarya"}, {"language", "C++"}};
     ASSERT_TRUE(minidb::StorageManager(path).save(snapshot, 1).is_ok());
     EXPECT_EQ(read_file(database.wal_path()), committed_wal);
 

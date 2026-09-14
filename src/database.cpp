@@ -2,8 +2,8 @@
 
 #include "minidb/transaction.hpp"
 
-#include <new>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>

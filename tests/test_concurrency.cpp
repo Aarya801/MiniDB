@@ -54,8 +54,7 @@ TEST(concurrent_disjoint_writes_preserve_every_entry) {
     workers.clear();
 
     EXPECT_EQ(failures.load(std::memory_order_relaxed), 0);
-    EXPECT_EQ(database.size(),
-              static_cast<std::size_t>(kThreadCount * kEntriesPerThread));
+    EXPECT_EQ(database.size(), static_cast<std::size_t>(kThreadCount * kEntriesPerThread));
     for (int worker = 0; worker < kThreadCount; ++worker) {
         for (int entry = 0; entry < kEntriesPerThread; ++entry) {
             const std::string key =
@@ -71,8 +70,8 @@ TEST(concurrent_reads_keep_lru_cache_and_values_consistent) {
     constexpr int kRounds = 30;
     Database database(7);
     for (int key = 0; key < kKeyCount; ++key) {
-        ASSERT_TRUE(database.set("key-" + std::to_string(key), "value-" + std::to_string(key))
-                        .is_ok());
+        ASSERT_TRUE(
+            database.set("key-" + std::to_string(key), "value-" + std::to_string(key)).is_ok());
     }
 
     std::latch ready(kThreadCount);
@@ -196,8 +195,7 @@ TEST(one_transaction_object_serializes_concurrent_local_changes) {
     EXPECT_EQ(transaction.change_count(),
               static_cast<std::size_t>(kThreadCount * kEntriesPerThread));
     ASSERT_TRUE(transaction.commit().is_ok());
-    EXPECT_EQ(database.size(),
-              static_cast<std::size_t>(kThreadCount * kEntriesPerThread));
+    EXPECT_EQ(database.size(), static_cast<std::size_t>(kThreadCount * kEntriesPerThread));
 }
 
 TEST(concurrent_commits_from_independent_transactions_do_not_lose_changes) {
@@ -292,12 +290,11 @@ TEST(concurrent_save_and_writes_recover_the_complete_final_state) {
 
     Database recovered(path);
     ASSERT_TRUE(recovered.open().is_ok());
-    EXPECT_EQ(recovered.size(),
-              static_cast<std::size_t>(kWriterCount * kEntriesPerWriter));
+    EXPECT_EQ(recovered.size(), static_cast<std::size_t>(kWriterCount * kEntriesPerWriter));
     for (int writer = 0; writer < kWriterCount; ++writer) {
         for (int entry = 0; entry < kEntriesPerWriter; ++entry) {
-            EXPECT_TRUE(recovered.exists("saved-" + std::to_string(writer) + "-" +
-                                         std::to_string(entry)));
+            EXPECT_TRUE(
+                recovered.exists("saved-" + std::to_string(writer) + "-" + std::to_string(entry)));
         }
     }
 }

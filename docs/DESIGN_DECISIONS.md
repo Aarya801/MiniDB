@@ -670,8 +670,10 @@ This is an educational integration, not a claimed speedup: the authoritative
 hash table is already in memory. A cache miss does not issue a disk read.
 Snapshot load/save and WAL replay remain proportional to their input, and
 mutations retain their WAL write/flush costs. The cache duplicates data and adds
-bookkeeping; no benchmark numbers or performance claims are supplied. It is
-single-threaded, has no byte-budget eviction, and adds no Milestone 7 features.
+bookkeeping. Milestone 6 supplied no benchmark claim; the later benchmark suite
+reports measured workloads with explicit limitations. `LruCache` itself has no
+internal synchronization, while Database now protects it with the Milestone 8
+lock protocol. The cache has no byte-budget eviction.
 
 ## Milestone 7: single-process transactions
 

@@ -513,7 +513,7 @@ TEST(a_truncated_record_is_rejected_at_every_cut_point) {
 // -------------------------------------------------------------------------
 
 TEST(duplicate_keys_in_a_snapshot_are_rejected) {
-    // save() cannot produce this, because the database holds each key once.
+    // save() rejects this, and the database itself holds each key only once.
     // A file containing it has been altered, and silently keeping whichever
     // record came last would be exactly the quiet data loss to avoid.
     const TempDirectory directory;
@@ -626,6 +626,8 @@ TEST(saving_refuses_records_that_could_not_be_read_back) {
               StatusCode::KeyTooLarge);
     EXPECT_EQ(storage.save({{"k", std::string(minidb::limits::kMaxValueSize + 1, 'v')}}).code(),
               StatusCode::ValueTooLarge);
+    EXPECT_EQ(storage.save({{"same", "first"}, {"same", "second"}}).code(),
+              StatusCode::InvalidArgument);
 
     // None of the refusals created a file.
     EXPECT_FALSE(storage.snapshot_exists());

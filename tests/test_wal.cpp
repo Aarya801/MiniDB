@@ -10,8 +10,8 @@
 
 using minidb::Database;
 using minidb::StatusCode;
-using minidb::WalOperation;
 using minidb::WalMutation;
+using minidb::WalOperation;
 using minidb::WalRecord;
 using minidb::WriteAheadLog;
 using minidb::testing::read_file;
@@ -110,8 +110,8 @@ TEST(transaction_record_replays_all_inner_mutations_with_one_sequence) {
 TEST(transaction_append_uses_one_outer_wal_record) {
     const TempDirectory dir;
     WriteAheadLog log(dir.file("log"));
-    const std::vector<WalMutation> changes = {
-        {WalOperation::Set, "a", "1"}, {WalOperation::Delete, "b", {}}};
+    const std::vector<WalMutation> changes = {{WalOperation::Set, "a", "1"},
+                                              {WalOperation::Delete, "b", {}}};
     ASSERT_TRUE(log.append_transaction(changes).is_ok());
     EXPECT_EQ(log.last_sequence(), std::uint64_t{1});
     EXPECT_EQ(read_file(log.path()).substr(6, 2), std::string("\x04\x00", 2));

@@ -455,12 +455,13 @@ Two strategies for getting data onto disk:
 | What is written | The whole database | Each change, as it happens |
 | Cost per change | O(n) — rewrites everything | O(1) — appends one record |
 | Cost to load | O(n) — one pass | O(changes) — replay the log |
-| Lost in a crash | Everything since the last save | Nothing that was flushed |
+| Lost on process termination while the OS stays healthy | Everything since the last save | At most an incomplete or unflushed tail |
 
-MiniDB currently does snapshots only, saving when the session ends. A clean
-exit persists everything; a killed process loses the session. That is the gap
-Milestone 4 fills: the log records each change immediately, so a crash costs at
-most the last unflushed write.
+At Milestone 3, MiniDB used snapshots only and saved when the session ended. A
+killed process could therefore lose the session. Milestone 4 closed that gap
+for process termination by logging each change immediately; the current design
+uses that WAL together with checkpointed snapshots. Device and OS failure still
+have the durability limits explained above.
 
 Real databases use both. The log captures changes cheaply as they arrive, and
 periodic snapshots keep the log from growing forever.
@@ -548,8 +549,10 @@ A cache hit does not make disk access O(1). MiniDB already loads its authoritati
 state into memory; a miss reads that table, not a disk page. Snapshot operations
 and WAL recovery keep their existing whole-input costs. This cache can even add
 overhead, so its value here is learning the data structure and keeping cached
-copies correct. Capacity limits entries, not RAM bytes. There is no concurrent
-access support and no claimed benchmark improvement.
+copies correct. Capacity limits entries, not RAM bytes. `LruCache` has no
+internal synchronization; `Database` protects it with the lock protocol
+described below. The benchmark observes selected workloads without claiming a
+general performance improvement.
 
 ## Transactions: private changes, then one publication
 

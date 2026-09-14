@@ -54,8 +54,7 @@ struct Measurement {
 
 void require_ok(const minidb::Result& result, std::string_view operation) {
     if (!result.is_ok()) {
-        throw std::runtime_error(std::string(operation) + " failed: " +
-                                 result.to_display_string());
+        throw std::runtime_error(std::string(operation) + " failed: " + result.to_display_string());
     }
 }
 
@@ -138,12 +137,10 @@ template<typename Trial>
     });
 }
 
-[[nodiscard]] Sample benchmark_cache_hits(std::size_t operation_count,
-                                          const DataSet& hot_data) {
+[[nodiscard]] Sample benchmark_cache_hits(std::size_t operation_count, const DataSet& hot_data) {
     minidb::Database database(kCacheWorkingSet);
     for (std::size_t index = 0; index < hot_data.keys.size(); ++index) {
-        require_ok(database.set(hot_data.keys[index], hot_data.values[index]),
-                   "cache setup SET");
+        require_ok(database.set(hot_data.keys[index], hot_data.values[index]), "cache setup SET");
     }
     for (const std::string& key : hot_data.keys) {
         require_ok(database.get(key), "cache warm GET");
@@ -177,8 +174,8 @@ template<typename Trial>
     return time_work([&] {
         std::size_t inserted = 0;
         for (std::size_t index = 0; index < data.keys.size(); ++index) {
-            inserted += table.insert_or_assign(data.keys[index], data.values[index]).second ? 1U
-                                                                                           : 0U;
+            inserted +=
+                table.insert_or_assign(data.keys[index], data.values[index]).second ? 1U : 0U;
         }
         return inserted + table.size();
     });
@@ -238,11 +235,10 @@ void print_measurement(const Measurement& measurement) {
         nanoseconds > 0.0 ? operations * 1'000'000'000.0 / nanoseconds : 0.0;
     const double average_nanoseconds = nanoseconds / operations;
 
-    std::cout << std::left << std::setw(28) << measurement.workload << std::right
-              << std::setw(12) << measurement.operation_count << std::fixed
-              << std::setprecision(3) << std::setw(16) << elapsed_ms << std::setprecision(0)
-              << std::setw(18) << operations_per_second << std::setprecision(1)
-              << std::setw(16) << average_nanoseconds << '\n';
+    std::cout << std::left << std::setw(28) << measurement.workload << std::right << std::setw(12)
+              << measurement.operation_count << std::fixed << std::setprecision(3) << std::setw(16)
+              << elapsed_ms << std::setprecision(0) << std::setw(18) << operations_per_second
+              << std::setprecision(1) << std::setw(16) << average_nanoseconds << '\n';
 
     // Keep each trial's observed data live through output without adding a
     // noisy checksum column to the result table.
@@ -259,16 +255,17 @@ int main() {
         const DataSet hot_data = make_data(kCacheWorkingSet);
         for (const std::size_t operation_count : kOperationCounts) {
             const DataSet data = make_data(operation_count);
-            print_measurement(measure("Database SET", operation_count,
-                                      [&] { return benchmark_set(data); }));
+            print_measurement(
+                measure("Database SET", operation_count, [&] { return benchmark_set(data); }));
             print_measurement(measure("Database GET (no cache)", operation_count,
                                       [&] { return benchmark_get(data); }));
             print_measurement(measure("Database DELETE", operation_count,
                                       [&] { return benchmark_delete(data); }));
             print_measurement(measure("Database mixed SET/GET", operation_count,
                                       [&] { return benchmark_mixed(data); }));
-            print_measurement(measure("Database GET (cache hit)", operation_count,
-                                      [&] { return benchmark_cache_hits(operation_count, hot_data); }));
+            print_measurement(measure("Database GET (cache hit)", operation_count, [&] {
+                return benchmark_cache_hits(operation_count, hot_data);
+            }));
             print_measurement(measure("HashTable insert", operation_count,
                                       [&] { return benchmark_hash_table_insert(data); }));
             print_measurement(measure("unordered_map insert", operation_count,

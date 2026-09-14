@@ -5,6 +5,8 @@
 #include <cstring>
 #include <fstream>
 #include <ios>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -87,13 +89,28 @@ private:
     return read_exact(in, into.data(), length);
 }
 
-/// Reads an environment variable, treating an empty value as unset.
-[[nodiscard]] const char* environment_value(const char* name) noexcept {
+/// Reads an environment variable into owned storage, treating an empty value
+/// as unset. MSVC deprecates getenv because its returned buffer is shared;
+/// _dupenv_s gives this call an independent allocation instead.
+[[nodiscard]] std::optional<std::string> environment_value(const char* name) {
+#if defined(_MSC_VER)
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, name) != 0) {
+        return std::nullopt;
+    }
+    const std::unique_ptr<char, decltype(&std::free)> owned(buffer, &std::free);
+    if (owned == nullptr || length <= 1) {
+        return std::nullopt;
+    }
+    return std::string(owned.get(), length - 1);
+#else
     const char* value = std::getenv(name);
     if (value == nullptr || *value == '\0') {
-        return nullptr;
+        return std::nullopt;
     }
-    return value;
+    return std::string(value);
+#endif
 }
 
 }  // namespace
@@ -125,6 +142,7 @@ Result StorageManager::save(const std::vector<Record>& records,
     // that slipped past the database's own checks would produce a snapshot
     // that cannot be read back -- a far worse failure than declining to save.
     std::uintmax_t encoded_size = checkpoint ? kCheckpointHeaderSize : kHeaderSize;
+    HashTable<Key, bool> seen(records.size() + 1);
     for (const Record& record : records) {
         if (record.key.empty() || record.key.size() > limits::kMaxKeySize) {
             return Result::failure(StatusCode::KeyTooLarge,
@@ -133,6 +151,10 @@ Result StorageManager::save(const std::vector<Record>& records,
         if (record.value.size() > limits::kMaxValueSize) {
             return Result::failure(StatusCode::ValueTooLarge,
                                    "record value exceeds the value size limit");
+        }
+        if (!seen.insert_or_assign(record.key, true)) {
+            return Result::failure(StatusCode::InvalidArgument,
+                                   "snapshot input contains a duplicate key");
         }
         const std::uintmax_t record_size = 8ULL + record.key.size() + record.value.size();
         if (record_size > limits::kMaxSnapshotSize - encoded_size) {
@@ -400,15 +422,15 @@ fs::path default_snapshot_path() {
     constexpr const char* kFileName = "minidb.snapshot";
 
 #if defined(_WIN32)
-    if (const char* local_app_data = environment_value("LOCALAPPDATA")) {
-        return fs::path(local_app_data) / kDirectoryName / kFileName;
+    if (const auto local_app_data = environment_value("LOCALAPPDATA")) {
+        return fs::path(*local_app_data) / kDirectoryName / kFileName;
     }
 #else
-    if (const char* data_home = environment_value("XDG_DATA_HOME")) {
-        return fs::path(data_home) / "minidb" / kFileName;
+    if (const auto data_home = environment_value("XDG_DATA_HOME")) {
+        return fs::path(*data_home) / "minidb" / kFileName;
     }
-    if (const char* home = environment_value("HOME")) {
-        return fs::path(home) / ".local" / "share" / "minidb" / kFileName;
+    if (const auto home = environment_value("HOME")) {
+        return fs::path(*home) / ".local" / "share" / "minidb" / kFileName;
     }
 #endif
 

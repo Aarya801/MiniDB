@@ -10,6 +10,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +34,18 @@ struct AlwaysCollide {
 struct HashByLength {
     [[nodiscard]] std::size_t operator()(const std::string& key) const noexcept {
         return key.size();
+    }
+};
+
+/// Each default-constructed instance uses a different salt. Value-semantic
+/// operations must carry that salt with the nodes whose cached hashes it made.
+struct StatefulHash {
+    static inline std::size_t next_salt = 0;
+
+    std::size_t salt = ++next_salt;
+
+    [[nodiscard]] std::size_t operator()(const std::string& key) const noexcept {
+        return std::hash<std::string>{}(key) ^ salt;
     }
 };
 
@@ -60,6 +75,7 @@ using CollidingTable = HashTable<std::string, int, AlwaysCollide>;
 using LengthTable = HashTable<std::string, int, HashByLength>;
 using StringTable = HashTable<std::string, int>;
 using IntTable = HashTable<int, std::string>;
+using StatefulTable = HashTable<std::string, int, StatefulHash>;
 
 /// Sorted, comma-joined keys. Comparing a string gives readable failures.
 template<typename Table>
@@ -460,6 +476,12 @@ TEST(bucket_counts_are_prime) {
     }
 }
 
+TEST(an_unrepresentable_bucket_count_is_rejected_without_overflow) {
+    EXPECT_THROWS_AS(static_cast<void>(minidb::detail::next_bucket_count(
+                         std::numeric_limits<std::size_t>::max())),
+                     std::length_error);
+}
+
 TEST(integer_keys_with_an_identity_hash_still_spread_out) {
     // libstdc++ defines std::hash<int> as the identity function. With a
     // power-of-two bucket count, multiples of the count would all collide.
@@ -614,6 +636,43 @@ TEST(move_assignment_transfers_the_entries) {
     EXPECT_EQ(target.size(), static_cast<std::size_t>(1));
     EXPECT_TRUE(target.contains("a"));
     EXPECT_FALSE(target.contains("old"));
+}
+
+TEST(stateful_hasher_stays_with_cached_hashes_during_value_operations) {
+    StatefulTable source;
+    source.insert_or_assign("a", 1);
+    source.insert_or_assign("b", 2);
+
+    StatefulTable copy(source);
+    ASSERT_TRUE(copy.find("a") != nullptr);
+    ASSERT_TRUE(copy.find("b") != nullptr);
+    EXPECT_EQ(*copy.find("a"), 1);
+    EXPECT_EQ(*copy.find("b"), 2);
+
+    StatefulTable assigned;
+    assigned.insert_or_assign("old", 99);
+    assigned = source;
+    ASSERT_TRUE(assigned.find("a") != nullptr);
+    ASSERT_TRUE(assigned.find("b") != nullptr);
+    EXPECT_EQ(*assigned.find("a"), 1);
+    EXPECT_EQ(*assigned.find("b"), 2);
+    EXPECT_FALSE(assigned.contains("old"));
+
+    StatefulTable moved(std::move(copy));
+    ASSERT_TRUE(moved.find("a") != nullptr);
+    ASSERT_TRUE(moved.find("b") != nullptr);
+    EXPECT_EQ(*moved.find("a"), 1);
+    EXPECT_EQ(*moved.find("b"), 2);
+
+    StatefulTable other;
+    other.insert_or_assign("other", 3);
+    swap(moved, other);
+    ASSERT_TRUE(moved.find("other") != nullptr);
+    ASSERT_TRUE(other.find("a") != nullptr);
+    ASSERT_TRUE(other.find("b") != nullptr);
+    EXPECT_EQ(*moved.find("other"), 3);
+    EXPECT_EQ(*other.find("a"), 1);
+    EXPECT_EQ(*other.find("b"), 2);
 }
 
 // -------------------------------------------------------------------------

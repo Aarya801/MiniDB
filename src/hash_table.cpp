@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <limits>
+#include <stdexcept>
 
 namespace minidb::detail {
 namespace {
@@ -30,8 +32,9 @@ constexpr std::array<std::size_t, 20> kBucketSizes = {
         return value == 2;
     }
     // Only odd divisors up to the square root can divide an odd number.
-    // Written as divisor * divisor <= value to avoid a floating-point sqrt.
-    for (std::size_t divisor = 3; divisor * divisor <= value; divisor += 2) {
+    // The division form avoids both a floating-point sqrt and multiplication
+    // overflow near the largest representable size.
+    for (std::size_t divisor = 3; divisor <= value / divisor; divisor += 2) {
         if (value % divisor == 0) {
             return false;
         }
@@ -41,8 +44,8 @@ constexpr std::array<std::size_t, 20> kBucketSizes = {
 
 }  // namespace
 
-std::size_t next_bucket_count(std::size_t minimum) noexcept {
-    const auto* entry = std::lower_bound(kBucketSizes.begin(), kBucketSizes.end(), minimum);
+std::size_t next_bucket_count(std::size_t minimum) {
+    const auto entry = std::lower_bound(kBucketSizes.begin(), kBucketSizes.end(), minimum);
     if (entry != kBucketSizes.end()) {
         return *entry;
     }
@@ -51,6 +54,9 @@ std::size_t next_bucket_count(std::size_t minimum) noexcept {
     // millions of entries, and the search is short because primes stay dense.
     std::size_t candidate = minimum | 1U;
     while (!is_prime(candidate)) {
+        if (candidate > std::numeric_limits<std::size_t>::max() - 2) {
+            throw std::length_error("HashTable bucket count is too large");
+        }
         candidate += 2;
     }
     return candidate;

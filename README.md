@@ -49,8 +49,12 @@ recovered at startup; mutations are logged immediately and a snapshot is saved o
 
 ## Requirements
 
-- A C++20 compiler: GCC 10+, Clang 12+, or MSVC 19.29+ (Visual Studio 2019 16.10+)
+- A C++20 compiler and standard library with `std::jthread`, `std::latch`,
+  `std::shared_mutex`, and the other C++20 facilities used by the project
 - CMake 3.20 or newer
+
+CI builds current GCC and Clang configurations. The Windows build is verified
+with Visual Studio 2026 / MSVC 19.51.
 
 MiniDB has no third-party dependencies. It configures and builds offline.
 
@@ -66,6 +70,16 @@ Then start a session:
 
 ```bash
 ./build/minidb
+```
+
+On Windows with Visual Studio 2026, use the multi-config generator and select
+the same configuration when building, testing, and running:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+cmake --build build --config Debug --parallel
+ctest --test-dir build -C Debug --output-on-failure
+.\build\Debug\minidb.exe
 ```
 
 MiniDB keeps its database in your user data directory
@@ -97,7 +111,7 @@ cmake --build build
 ```text
 $ ./build/minidb
 MiniDB v0.1.0
-Database: /home/aarya/.local/share/minidb/minidb.snapshot
+Database: /home/user/.local/share/minidb/minidb.snapshot
 New database: nothing saved here yet.
 Type HELP for the command list.
 
@@ -207,10 +221,10 @@ flowchart TD
     Database --> WAL[WriteAheadLog]
     WAL --> Log[(Binary WAL)]
 
-    classDef planned stroke-dasharray: 4 4
 ```
 
-Solid arrows exist today; dashed boxes are later milestones.
+Solid arrows show calls and data flow; dashed arrows show components sharing
+the common `Result` error model.
 
 Each component has one job:
 
@@ -439,6 +453,13 @@ And it is not intended to ever implement:
 - A query planner or optimiser
 - Full ACID isolation between concurrent transactions
 - Multi-process coordination
+
+## Maintenance roadmap
+
+Milestone 9 completes the planned feature set. Future work is limited to
+portability fixes, confirmed bug fixes, focused regression tests, and keeping
+the documentation aligned with the implementation. The larger database
+subsystems listed above remain intentionally outside this project's scope.
 
 ## Documentation
 

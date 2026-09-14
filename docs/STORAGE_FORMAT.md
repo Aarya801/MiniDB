@@ -251,12 +251,12 @@ For `n` records:
 
 | Operation | Time | Memory |
 | --- | --- | --- |
-| `save` | O(n) | O(1) beyond the records handed in |
+| `save` | O(n) | O(n) for duplicate-key validation beyond the records handed in |
 | `load` | O(n) | O(n) for the records produced |
 
 Neither is O(1), and neither can be: both touch every record. Duplicate
-detection during load uses MiniDB's own `HashTable`, keeping it O(n) on average
-rather than the O(n log n) a sort would cost.
+detection during save and load uses MiniDB's own `HashTable`, keeping it O(n)
+on average rather than the O(n log n) a sort would cost.
 
 ## Versioning
 

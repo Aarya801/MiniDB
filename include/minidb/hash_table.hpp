@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,7 +22,7 @@ namespace detail {
 /// function -- with 16 buckets the keys 0, 16, 32, 48 would all land in
 /// bucket 0. A prime modulus mixes every bit of the hash into the result, so
 /// a weak hash degrades gracefully instead of collapsing.
-[[nodiscard]] std::size_t next_bucket_count(std::size_t minimum) noexcept;
+[[nodiscard]] std::size_t next_bucket_count(std::size_t minimum);
 
 }  // namespace detail
 
@@ -86,7 +87,8 @@ public:
 
     ~HashTable() { clear(); }
 
-    HashTable(const HashTable& other) : buckets_(other.buckets_.size()), size_(0) {
+    HashTable(const HashTable& other)
+        : buckets_(other.buckets_.size()), size_(0), hasher_(other.hasher_) {
         // Copy chains node by node. Copying the unique_ptrs is impossible by
         // design, which is exactly what stops two tables sharing nodes.
         other.for_each(
@@ -102,21 +104,25 @@ public:
         return *this;
     }
 
-    HashTable(HashTable&& other) noexcept
-        : buckets_(std::move(other.buckets_)), size_(other.size_) {
+    HashTable(HashTable&& other) noexcept(std::is_nothrow_move_constructible_v<Hash>)
+        : buckets_(std::move(other.buckets_)),
+          size_(other.size_),
+          hasher_(std::move(other.hasher_)) {
         other.size_ = 0;
     }
 
     /// Move assignment by swap. The old contents travel into `other` and are
     /// destroyed by its destructor, which frees chains iteratively.
-    HashTable& operator=(HashTable&& other) noexcept {
+    HashTable& operator=(HashTable&& other) noexcept(std::is_nothrow_swappable_v<Hash>) {
         swap(other);
         return *this;
     }
 
-    void swap(HashTable& other) noexcept {
+    void swap(HashTable& other) noexcept(std::is_nothrow_swappable_v<Hash>) {
         buckets_.swap(other.buckets_);
         std::swap(size_, other.size_);
+        using std::swap;
+        swap(hasher_, other.hasher_);
     }
 
     /// Stores `value` under `key`, replacing any existing entry.
@@ -364,7 +370,8 @@ private:
 };
 
 template<typename Key, typename Value, typename Hash>
-void swap(HashTable<Key, Value, Hash>& left, HashTable<Key, Value, Hash>& right) noexcept {
+void swap(HashTable<Key, Value, Hash>& left,
+          HashTable<Key, Value, Hash>& right) noexcept(std::is_nothrow_swappable_v<Hash>) {
     left.swap(right);
 }
 
