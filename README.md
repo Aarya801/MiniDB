@@ -26,7 +26,7 @@ Built in milestones, each one a working program.
 - [x] **Milestone 6** — LRU read cache
 - [x] **Milestone 7** — single-process transactions
 - [x] **Milestone 8** — single-process concurrency and thread safety
-- [ ] Milestone 9 — benchmarks
+- [x] **Milestone 9** — benchmarks and measured performance notes
 
 ## What works today
 
@@ -82,6 +82,7 @@ different file:
 | Option | Default | Effect |
 | --- | --- | --- |
 | `MINIDB_BUILD_TESTS` | `ON` | Build the test suite |
+| `MINIDB_BUILD_BENCHMARKS` | `ON` | Build the standalone benchmark executable |
 | `MINIDB_WARNINGS_AS_ERRORS` | `OFF` | Fail the build on any compiler warning (CI sets this to `ON`) |
 
 For a release build:
@@ -393,9 +394,29 @@ Tests use a small in-repo framework (`tests/test_framework.hpp`) rather than a
 third-party library. The reasoning is in
 [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md).
 
+## Performance and benchmarks
+
+`minidb_benchmark` measures SET, GET, DELETE, mixed SET/GET, warmed cache-hit
+GET, and raw `HashTable`/`std::unordered_map` workloads at 1,000, 10,000, and
+100,000 operations. It uses `std::chrono::steady_clock` and reports the median
+of five Release-build trials as elapsed time, operations per second, and
+average nanoseconds per operation.
+
+```bash
+cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release
+cmake --build build-bench --target minidb_benchmark
+./build-bench/minidb_benchmark
+```
+
+The benchmark uses an in-memory database and is not part of CTest. See
+[Benchmark methodology and measured results](docs/BENCHMARKS.md) for the exact
+environment, numbers, interpretation, and limitations. Results vary by
+hardware, compiler, build settings, power mode, and system load; they are not
+a claim that MiniDB outperforms production databases.
+
 ## Limitations
 
-As of Milestone 8, MiniDB does **not**:
+As of Milestone 9, MiniDB does **not**:
 
 - Guarantee durability against power loss. Saves are not `fsync`ed.
 - Update the snapshot incrementally. Every save rewrites the whole file, so
@@ -424,6 +445,7 @@ And it is not intended to ever implement:
 - [WAL format and recovery](docs/WAL.md) — mutation records, durability, and limitations
 - [Transactions](docs/TRANSACTIONS.md) — lifecycle, visibility, WAL/cache interaction, and guarantees
 - [Concurrency](docs/CONCURRENCY.md) — protected state, lock modes, ordering, and limitations
+- [Benchmarks](docs/BENCHMARKS.md) — methodology, measured results, interpretation, and limitations
 - [Storage format](docs/STORAGE_FORMAT.md) — the snapshot layout, byte by byte
 - [Design decisions](docs/DESIGN_DECISIONS.md) — why things are built the way they are
 - [Learning notes](docs/LEARNING_NOTES.md) — the concepts behind the code, explained from scratch

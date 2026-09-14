@@ -28,6 +28,7 @@ if(NOT is_multi_config AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(MINIDB_BUILD_TESTS "Build the MiniDB test suite" ON)
+option(MINIDB_BUILD_BENCHMARKS "Build the MiniDB benchmark executable" ON)
 option(MINIDB_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # --------------------------------------------------------------------------
@@ -94,6 +95,17 @@ target_compile_definitions(minidb_core PUBLIC MINIDB_VERSION="${PROJECT_VERSION}
 # --------------------------------------------------------------------------
 add_executable(minidb cli/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core minidb_warnings)
+
+# --------------------------------------------------------------------------
+# Benchmarks
+#
+# The benchmark is an executable, not a CTest test. It is run deliberately so
+# timing work never makes the correctness suite slower or less deterministic.
+# --------------------------------------------------------------------------
+if(MINIDB_BUILD_BENCHMARKS)
+    add_executable(minidb_benchmark benchmarks/benchmark.cpp)
+    target_link_libraries(minidb_benchmark PRIVATE minidb_core minidb_warnings)
+endif()
 
 # --------------------------------------------------------------------------
 # Tests
