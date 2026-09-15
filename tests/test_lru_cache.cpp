@@ -138,7 +138,8 @@ TEST(cache_copy_rebuilds_iterators_and_preserves_order) {
     assigned = copy;
     copy.clear();
     EXPECT_EQ(*assigned.get("c"), std::string("3"));
-    assigned = assigned;
+    auto& alias = assigned;
+    assigned = alias;
     EXPECT_EQ(assigned.size(), std::size_t{2});
 }
 TEST(cache_move_and_swap_keep_index_and_list_together) {
