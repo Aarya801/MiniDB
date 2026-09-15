@@ -418,10 +418,10 @@ Result StorageManager::load(std::vector<Record>& records, std::uint64_t* checkpo
 }
 
 fs::path default_snapshot_path() {
-    constexpr const char* kDirectoryName = "MiniDB";
     constexpr const char* kFileName = "minidb.snapshot";
 
 #if defined(_WIN32)
+    constexpr const char* kDirectoryName = "MiniDB";
     if (const auto local_app_data = environment_value("LOCALAPPDATA")) {
         return fs::path(*local_app_data) / kDirectoryName / kFileName;
     }
