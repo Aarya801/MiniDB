@@ -8,12 +8,12 @@
 // write into the repository, never touch the user's real database, and never
 // depend on a hard-coded path.
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <ios>
-#include <iterator>
 #include <random>
 #include <string>
 #include <system_error>
@@ -77,7 +77,14 @@ private:
     if (!in) {
         return {};
     }
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+
+    std::string bytes;
+    std::array<char, 4096> buffer{};
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        bytes.append(buffer.data(), static_cast<std::size_t>(in.gcount()));
+    }
+    return bytes;
 }
 
 /// Writes bytes to a file, replacing it. Returns false on failure.
